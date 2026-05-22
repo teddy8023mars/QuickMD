@@ -89,6 +89,9 @@ targets:
     sources:
       - path: QuickMDPreview/PreviewViewController.swift
         type: file
+      - path: QuickMDPreview/vendor
+        type: folder
+        buildPhase: resources
     entitlements:
       path: QuickMDPreview/QuickMDPreview.entitlements
     settings:
@@ -101,6 +104,8 @@ targets:
         SKIP_INSTALL: YES
         CODE_SIGN_ENTITLEMENTS: QuickMDPreview/QuickMDPreview.entitlements
         ENABLE_APP_SANDBOX: YES
+        ENABLE_OUTGOING_NETWORK_CONNECTIONS: YES
+        ENABLE_USER_SELECTED_FILES: readonly
     dependencies:
       - framework: QuickLook.framework
         implicit: true

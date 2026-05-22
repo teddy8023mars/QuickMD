@@ -17,6 +17,8 @@ class PreviewViewController: NSViewController, QLPreviewingController {
         config.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
         webView = WKWebView(frame: NSRect(x: 0, y: 0, width: 800, height: 600), configuration: config)
         webView.autoresizingMask = [.width, .height]
+        // Prevent white flash by setting opaque to false
+        webView.setValue(false, forKey: "drawsBackground")
         self.view = webView
     }
 
@@ -28,6 +30,7 @@ class PreviewViewController: NSViewController, QLPreviewingController {
             let baseURL = url.deletingLastPathComponent()
             let html = buildPreviewHTML(markdown: markdown, filename: url.lastPathComponent, baseURL: baseURL)
             webView.loadHTMLString(html, baseURL: baseURL)
+            // Give WebView time to render
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 handler(nil)
             }
@@ -36,10 +39,38 @@ class PreviewViewController: NSViewController, QLPreviewingController {
         }
     }
 
+    // MARK: - Load bundled JS/CSS resources
+
+    private func loadBundledResource(_ filename: String) -> String {
+        let bundle = Bundle(for: PreviewViewController.self)
+        // Try with subdirectory first
+        if let url = bundle.url(forResource: filename, withExtension: nil, subdirectory: "vendor") {
+            return (try? String(contentsOf: url, encoding: .utf8)) ?? "/* failed to read \(filename) */"
+        }
+        // Try without subdirectory
+        if let url = bundle.url(forResource: filename, withExtension: nil) {
+            return (try? String(contentsOf: url, encoding: .utf8)) ?? "/* failed to read \(filename) */"
+        }
+        // Try splitting name and extension
+        let parts = filename.split(separator: ".", maxSplits: 1)
+        if parts.count == 2, let url = bundle.url(forResource: String(parts[0]), withExtension: String(parts[1]), subdirectory: "vendor") {
+            return (try? String(contentsOf: url, encoding: .utf8)) ?? "/* failed to read \(filename) */"
+        }
+        return "/* \(filename) not found in bundle */"
+    }
+
     // MARK: - HTML Generation
 
     private func buildPreviewHTML(markdown: String, filename: String, baseURL: URL) -> String {
         let escapedMarkdown = escapeForJS(markdown)
+
+        // Load JS libraries from bundle (offline, no network needed)
+        let markedJS = loadBundledResource("marked.min.js")
+        let purifyJS = loadBundledResource("purify.min.js")
+        let highlightJS = loadBundledResource("highlight.min.js")
+        let katexJS = loadBundledResource("katex.min.js")
+        let autoRenderJS = loadBundledResource("auto-render.min.js")
+        let katexCSS = loadBundledResource("katex.min.css")
 
         return """
         <!DOCTYPE html>
@@ -49,7 +80,7 @@ class PreviewViewController: NSViewController, QLPreviewingController {
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <base href="\(baseURL.absoluteString)">
         <title>\(filename)</title>
-        <link rel="stylesheet" href="https://unpkg.com/katex@0.16.21/dist/katex.min.css">
+        <style>\(katexCSS)</style>
         <style>
         :root {
             --bg: #ffffff;
@@ -76,15 +107,22 @@ class PreviewViewController: NSViewController, QLPreviewingController {
             }
         }
         * { box-sizing: border-box; }
+        html, body {
+            background: var(--bg);
+        }
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
             font-size: 15px;
             line-height: 1.7;
             color: var(--fg);
-            background: var(--bg);
             margin: 0;
             padding: 24px 40px;
             max-width: 900px;
+            opacity: 0;
+            transition: opacity 0.15s ease-in;
+        }
+        body.ready {
+            opacity: 1;
         }
         h1, h2, h3, h4, h5, h6 { margin-top: 1.5em; margin-bottom: 0.5em; font-weight: 600; color: var(--fg); }
         h1 { font-size: 2em; border-bottom: 1px solid var(--border); padding-bottom: 0.3em; }
@@ -108,7 +146,7 @@ class PreviewViewController: NSViewController, QLPreviewingController {
             overflow-x: auto;
             line-height: 1.5;
         }
-        pre code { background: none; padding: 0; font-size: 0.85em; }
+        pre code { background: none; padding: 0; font-size: 0.85em; color: var(--code-fg); }
         blockquote {
             margin: 1em 0;
             padding: 0.5em 1em;
@@ -123,48 +161,81 @@ class PreviewViewController: NSViewController, QLPreviewingController {
         hr { border: none; border-top: 1px solid var(--border); margin: 2em 0; }
         ul, ol { padding-left: 2em; }
         li { margin: 0.3em 0; }
-        input[type="checkbox"] { margin-right: 0.5em; vertical-align: middle; }
+        /* Custom checkbox styling to prevent flicker */
+        input[type="checkbox"] {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 16px;
+            height: 16px;
+            border: 1.5px solid var(--border);
+            border-radius: 3px;
+            background: var(--bg);
+            vertical-align: middle;
+            margin-right: 0.5em;
+            position: relative;
+            top: -1px;
+            pointer-events: none;
+        }
+        input[type="checkbox"]:checked {
+            background: var(--link);
+            border-color: var(--link);
+        }
+        input[type="checkbox"]:checked::after {
+            content: '';
+            position: absolute;
+            left: 4px;
+            top: 1px;
+            width: 5px;
+            height: 9px;
+            border: solid white;
+            border-width: 0 2px 2px 0;
+            transform: rotate(45deg);
+        }
         .task-list-item { list-style: none; margin-left: -1.5em; }
         </style>
         </head>
         <body>
         <div id="content"></div>
-        <script src="https://unpkg.com/marked@15.0.7/marked.min.js"></script>
-        <script src="https://unpkg.com/dompurify@3.3.2/dist/purify.min.js"></script>
-        <script src="https://unpkg.com/@highlightjs/cdn-assets@11.11.1/highlight.min.js"></script>
-        <script src="https://unpkg.com/katex@0.16.21/dist/katex.min.js"></script>
-        <script src="https://unpkg.com/katex@0.16.21/dist/contrib/auto-render.min.js"></script>
+        <script>\(markedJS)</script>
+        <script>\(purifyJS)</script>
+        <script>\(highlightJS)</script>
+        <script>\(katexJS)</script>
+        <script>\(autoRenderJS)</script>
         <script>
         (function() {
-            const markdown = "\(escapedMarkdown)";
-            marked.setOptions({ gfm: true, breaks: false, pedantic: false });
-            const rawHtml = marked.parse(markdown);
-            const cleanHtml = DOMPurify.sanitize(rawHtml, {
-                ADD_TAGS: ['input'],
-                ADD_ATTR: ['type', 'checked', 'disabled', 'class'],
-                ALLOW_DATA_ATTR: true
-            });
-            const contentEl = document.getElementById('content');
-            contentEl.innerHTML = cleanHtml;
-            // Disable checkboxes in preview
-            const checkboxes = contentEl.querySelectorAll('input[type="checkbox"]');
-            for (const cb of checkboxes) cb.disabled = true;
-            // Highlight code blocks
-            if (window.hljs) {
-                const blocks = contentEl.querySelectorAll('pre code');
-                for (const block of blocks) window.hljs.highlightElement(block);
-            }
-            // Render math
-            if (window.renderMathInElement) {
-                renderMathInElement(contentEl, {
-                    delimiters: [
-                        { left: '$$', right: '$$', display: true },
-                        { left: '$', right: '$', display: false },
-                        { left: '\\\\[', right: '\\\\]', display: true },
-                        { left: '\\\\(', right: '\\\\)', display: false }
-                    ],
-                    throwOnError: false
+            try {
+                const markdown = "\(escapedMarkdown)";
+                marked.setOptions({ gfm: true, breaks: false, pedantic: false });
+                const rawHtml = marked.parse(markdown);
+                const cleanHtml = DOMPurify.sanitize(rawHtml, {
+                    ADD_TAGS: ['input'],
+                    ADD_ATTR: ['type', 'checked', 'disabled', 'class'],
+                    ALLOW_DATA_ATTR: true
                 });
+                const contentEl = document.getElementById('content');
+                contentEl.innerHTML = cleanHtml;
+                // Highlight code blocks
+                if (window.hljs) {
+                    const blocks = contentEl.querySelectorAll('pre code');
+                    for (const block of blocks) window.hljs.highlightElement(block);
+                }
+                // Render math
+                if (window.renderMathInElement) {
+                    renderMathInElement(contentEl, {
+                        delimiters: [
+                            { left: '$$', right: '$$', display: true },
+                            { left: '$', right: '$', display: false },
+                            { left: '\\\\[', right: '\\\\]', display: true },
+                            { left: '\\\\(', right: '\\\\)', display: false }
+                        ],
+                        throwOnError: false
+                    });
+                }
+                // Show content after rendering is complete
+                document.body.classList.add('ready');
+            } catch(e) {
+                document.getElementById('content').innerHTML = '<pre style="color:red;">Error: ' + e.message + '\\n' + e.stack + '</pre>';
+                document.body.classList.add('ready');
             }
         })();
         </script>
