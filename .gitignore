@@ -1,0 +1,14 @@
+# Build outputs
+dist/
+.build/
+
+# macOS
+.DS_Store
+*.swp
+*~
+
+# IDE
+.idea/
+.vscode/
+*.xcodeproj/
+*.xcworkspace/
