@@ -97,6 +97,15 @@
     updateToggleButton();
   }
 
+  function createTOCToggleButton() {
+    const btn = document.createElement("button");
+    btn.className = "toc-toggle";
+    btn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 5h13"/><path d="M13 12h8"/><path d="M13 19h8"/><path d="M3 10a2 2 0 0 0 2 2h3"/><path d="M3 5v12a2 2 0 0 0 2 2h3"/></svg>';
+    btn.setAttribute("aria-label", "Toggle Table of Contents");
+    btn.addEventListener("click", toggleTOC);
+    document.body.appendChild(btn);
+  }
+
   // ─── TOC Sidebar ───────────────────────────────────────────────────
 
   function buildTOC() {
@@ -153,7 +162,7 @@
 
   function applyRenderedContent() {
     contentEl.innerHTML = renderedContentHtml || "<p></p>";
-    disableTaskCheckboxes(contentEl);
+    enableTaskCheckboxes(contentEl);
     finalizeLinks(contentEl);
     finalizeImages(contentEl);
     highlightCode(contentEl);
@@ -355,9 +364,18 @@
     for (const image of images) { image.loading = "lazy"; image.decoding = "async"; }
   }
 
-  function disableTaskCheckboxes(root) {
+  function enableTaskCheckboxes(root) {
     const checkboxes = root.querySelectorAll('input[type="checkbox"]');
-    for (const cb of checkboxes) cb.disabled = true;
+    checkboxes.forEach((cb, index) => {
+      cb.disabled = false;
+      cb.style.cursor = "pointer";
+      cb.addEventListener("change", () => {
+        window.webkit.messageHandlers.checkboxToggle.postMessage({
+          index: index,
+          checked: cb.checked
+        });
+      });
+    });
   }
 
   function highlightCode(root) {
@@ -527,6 +545,7 @@
   function init() {
     initTheme();
     createToggleButton();
+    createTOCToggleButton();
     createSearchPanel();
     configureMarked();
 

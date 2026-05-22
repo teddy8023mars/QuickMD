@@ -12,3 +12,6 @@ dist/
 .vscode/
 *.xcodeproj/
 *.xcworkspace/
+build/
+*.xcodeproj
+.DS_Store

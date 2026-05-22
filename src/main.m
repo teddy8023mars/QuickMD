@@ -26,7 +26,7 @@ static NSError *QMDMakeError(NSInteger code, NSString *description) {
 
 #pragma mark - Preview Window Controller
 
-@interface QMDPreviewWindowController : NSWindowController <NSWindowDelegate, WKNavigationDelegate, WKUIDelegate>
+@interface QMDPreviewWindowController : NSWindowController <NSWindowDelegate, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler>
 
 @property(nonatomic, copy) void (^closeHandler)(void);
 @property(nonatomic, strong) WKWebView *webView;
@@ -38,6 +38,8 @@ static NSError *QMDMakeError(NSInteger code, NSString *description) {
 @property(nonatomic, assign) CGFloat pendingScrollTop;
 @property(nonatomic, assign) CGFloat pendingScrollRatio;
 @property(nonatomic, assign) BOOL hasPendingScrollRestore;
+@property(nonatomic, assign) BOOL hasAutoResized;
+@property(nonatomic, assign) BOOL pendingTOCVisible;
 
 - (BOOL)openMarkdownFileURL:(NSURL *)fileURL error:(NSError **)error;
 - (void)reloadPreview:(id)sender;
@@ -51,7 +53,12 @@ static NSError *QMDMakeError(NSInteger code, NSString *description) {
 @implementation QMDPreviewWindowController
 
 - (instancetype)init {
-    NSRect frame = NSMakeRect(0.0, 0.0, 900.0, 1000.0);
+    // Initial frame will be adjusted after content loads
+    NSScreen *screen = [NSScreen mainScreen];
+    NSRect screenFrame = screen.visibleFrame;
+    CGFloat initialWidth = MIN(900.0, screenFrame.size.width * 0.65);
+    CGFloat initialHeight = MIN(700.0, screenFrame.size.height * 0.7);
+    NSRect frame = NSMakeRect(0.0, 0.0, initialWidth, initialHeight);
     NSWindowStyleMask styleMask = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
                                   NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable;
     NSWindow *window = [[NSWindow alloc] initWithContentRect:frame
@@ -66,9 +73,11 @@ static NSError *QMDMakeError(NSInteger code, NSString *description) {
     window.title = @"QuickMD";
     window.titleVisibility = NSWindowTitleVisible;
     window.tabbingMode = NSWindowTabbingModePreferred;
+    window.minSize = NSMakeSize(400.0, 300.0);
     [window center];
 
     WKWebViewConfiguration *configuration = [[WKWebViewConfiguration alloc] init];
+    [configuration.userContentController addScriptMessageHandler:self name:@"checkboxToggle"];
     self.webView = [[WKWebView alloc] initWithFrame:window.contentView.bounds configuration:configuration];
     self.webView.navigationDelegate = self;
     self.webView.UIDelegate = self;
@@ -228,7 +237,8 @@ static NSError *QMDMakeError(NSInteger code, NSString *description) {
          "  const maxScroll = Math.max(scrollHeight - viewportHeight, 0);"
          "  const scrollTop = Math.max(window.scrollY || window.pageYOffset || doc.scrollTop || body.scrollTop || 0, 0);"
          "  const scrollRatio = maxScroll > 0 ? scrollTop / maxScroll : 0;"
-         "  return { scrollTop, scrollRatio };"
+         "  const tocVisible = document.body.classList.contains('has-toc');"
+         "  return { scrollTop, scrollRatio, tocVisible };"
          "})()";
 
     [self.webView evaluateJavaScript:captureScript completionHandler:^(id result, NSError *scriptError) {
@@ -241,6 +251,7 @@ static NSError *QMDMakeError(NSInteger code, NSString *description) {
             NSDictionary *scrollState = (NSDictionary *)result;
             NSNumber *scrollTop = scrollState[@"scrollTop"];
             NSNumber *scrollRatio = scrollState[@"scrollRatio"];
+            NSNumber *tocVisible = scrollState[@"tocVisible"];
 
             if ([scrollTop isKindOfClass:NSNumber.class]) {
                 strongSelf.pendingScrollTop = scrollTop.doubleValue;
@@ -248,6 +259,9 @@ static NSError *QMDMakeError(NSInteger code, NSString *description) {
             }
             if ([scrollRatio isKindOfClass:NSNumber.class]) {
                 strongSelf.pendingScrollRatio = scrollRatio.doubleValue;
+            }
+            if ([tocVisible isKindOfClass:NSNumber.class]) {
+                strongSelf.pendingTOCVisible = tocVisible.boolValue;
             }
         }
 
@@ -379,10 +393,124 @@ static void QMDFSEventCallback(ConstFSEventStreamRef streamRef,
     if (self.closeHandler) self.closeHandler();
 }
 
+#pragma mark - Auto Resize
+
+- (void)autoResizeWindowToFitContent {
+    self.hasAutoResized = YES;
+
+    NSString *script =
+        @"(() => {"
+         "  const body = document.body;"
+         "  const doc = document.documentElement;"
+         "  const contentHeight = Math.max(body.scrollHeight, body.offsetHeight, doc.scrollHeight, doc.offsetHeight);"
+         "  const hasWideContent = !!(document.querySelector('table, .mermaid-diagram, pre code'));"
+         "  return JSON.stringify({ contentHeight: contentHeight, hasWideContent: hasWideContent });"
+         "})()";
+
+    __weak typeof(self) weakSelf = self;
+    [self.webView evaluateJavaScript:script completionHandler:^(id result, NSError *error) {
+        if (error || !result || ![result isKindOfClass:[NSString class]]) return;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [weakSelf applyAutoResizeWithJSON:(NSString *)result];
+        });
+    }];
+}
+
+- (void)applyAutoResizeWithJSON:(NSString *)json {
+    NSData *data = [json dataUsingEncoding:NSUTF8StringEncoding];
+    NSDictionary *info = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    if (!info) return;
+
+    CGFloat contentHeight = [info[@"contentHeight"] doubleValue];
+    BOOL hasWideContent = [info[@"hasWideContent"] boolValue];
+
+    NSScreen *screen = self.window.screen ?: [NSScreen mainScreen];
+    NSRect screenFrame = screen.visibleFrame;
+
+    // Width: wider for tables/code/diagrams, narrower for pure text
+    CGFloat idealWidth = hasWideContent ? 1000.0 : 820.0;
+    CGFloat maxWidth = screenFrame.size.width * 0.75;
+    CGFloat finalWidth = MIN(idealWidth, maxWidth);
+
+    // Height: fit content but cap at screen limit
+    CGFloat titleBarHeight = 28.0;
+    CGFloat padding = 80.0;
+    CGFloat idealHeight = contentHeight + titleBarHeight + padding;
+    CGFloat maxHeight = screenFrame.size.height * 0.85;
+    CGFloat minHeight = 400.0;
+    CGFloat finalHeight = MAX(minHeight, MIN(idealHeight, maxHeight));
+
+    // Calculate centered position
+    CGFloat x = screenFrame.origin.x + (screenFrame.size.width - finalWidth) / 2.0;
+    CGFloat y = screenFrame.origin.y + (screenFrame.size.height - finalHeight) / 2.0;
+    NSRect newFrame = NSMakeRect(x, y, finalWidth, finalHeight);
+
+    [self.window setFrame:newFrame display:YES animate:YES];
+}
+
+#pragma mark - WKScriptMessageHandler
+
+- (void)userContentController:(WKUserContentController *)userContentController
+      didReceiveScriptMessage:(WKScriptMessage *)message {
+    if (![message.name isEqualToString:@"checkboxToggle"]) return;
+    if (![message.body isKindOfClass:[NSDictionary class]]) return;
+
+    NSDictionary *body = (NSDictionary *)message.body;
+    NSInteger checkboxIndex = [body[@"index"] integerValue];
+    BOOL checked = [body[@"checked"] boolValue];
+
+    if (!self.sourceFileURL) return;
+
+    NSError *error = nil;
+    NSString *content = [NSString stringWithContentsOfURL:self.sourceFileURL
+                                                encoding:NSUTF8StringEncoding
+                                                   error:&error];
+    if (error || !content) return;
+
+    // Find the Nth task list checkbox in the markdown source
+    NSString *pattern = @"- \\[([ xX])\\]";
+    NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:pattern
+                                                                          options:0
+                                                                            error:nil];
+    NSArray<NSTextCheckingResult *> *matches = [regex matchesInString:content
+                                                             options:0
+                                                               range:NSMakeRange(0, content.length)];
+
+    if (checkboxIndex < 0 || checkboxIndex >= (NSInteger)matches.count) return;
+
+    NSTextCheckingResult *match = matches[checkboxIndex];
+    NSRange fullRange = match.range;
+    NSString *replacement = checked ? @"- [x]" : @"- [ ]";
+
+    NSMutableString *mutableContent = [content mutableCopy];
+    [mutableContent replaceCharactersInRange:fullRange withString:replacement];
+
+    // Write back to file (temporarily stop watching to avoid reload loop)
+    [self stopWatchingSourceFile];
+    [mutableContent writeToURL:self.sourceFileURL atomically:YES encoding:NSUTF8StringEncoding error:nil];
+
+    // Restart file watching after a longer delay to ensure FS events are flushed
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [self startWatchingSourceFile];
+    });
+}
+
 #pragma mark - WKNavigationDelegate
 
 - (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation {
     self.previewReady = YES;
+
+    // Auto-resize window to fit content on first load
+    if (!self.hasAutoResized) {
+        [self autoResizeWindowToFitContent];
+    }
+
+    // Restore TOC sidebar state
+    if (self.pendingTOCVisible) {
+        NSString *tocScript = @"if (window.toggleTOC && !document.body.classList.contains('has-toc')) { window.toggleTOC(); }";
+        [self.webView evaluateJavaScript:tocScript completionHandler:nil];
+        self.pendingTOCVisible = NO;
+    }
 
     if (!self.hasPendingScrollRestore) return;
 

@@ -364,9 +364,15 @@ build_bundle() {
     plutil -lint "$CONTENTS_DIR/Info.plist" >/dev/null
     bash -n "$RESOURCES_DIR/QuickMDRenderer.sh"
 
+    # Build Quick Look Extension (if swiftc is available)
+    build_quicklook_extension
+
     # Ad-hoc code sign
     if command -v codesign >/dev/null 2>&1; then
         printf '  Signing app bundle...\n'
+        if [ -d "$APP_DIR/Contents/PlugIns/QuickMDPreview.appex" ]; then
+            codesign --force --sign - --deep "$APP_DIR/Contents/PlugIns/QuickMDPreview.appex" >/dev/null 2>&1 || true
+        fi
         codesign --force --deep --sign - "$APP_DIR" >/dev/null 2>&1 || \
             printf '  Warning: ad-hoc codesign failed; app may need manual approval.\n'
     fi
@@ -383,6 +389,60 @@ build_bundle() {
     printf '    2. open /Applications/QuickMD.app\n'
     printf '    3. Right-click .md -> Get Info -> Open With -> QuickMD -> Change All\n'
     printf '\n'
+}
+
+build_quicklook_extension() {
+    # Check if swiftc is available (requires Xcode)
+    if ! command -v swiftc >/dev/null 2>&1; then
+        printf '  Skipping Quick Look extension (swiftc not found; install Xcode for Quick Look support)\n'
+        return
+    fi
+
+    local ql_src="$SCRIPT_DIR/QuickMDPreview"
+    if [ ! -f "$ql_src/PreviewViewController.swift" ]; then
+        printf '  Skipping Quick Look extension (source not found)\n'
+        return
+    fi
+
+    printf '  Building Quick Look Extension...\n'
+
+    local ext_dir="$APP_DIR/Contents/PlugIns/QuickMDPreview.appex"
+    local ext_macos="$ext_dir/Contents/MacOS"
+    local ext_resources="$ext_dir/Contents/Resources"
+    mkdir -p "$ext_macos" "$ext_resources"
+
+    # Compile Swift extension
+    swiftc \
+        -target "$(uname -m)-apple-macosx13.0" \
+        -sdk "$(xcrun --show-sdk-path --sdk macosx)" \
+        -framework Cocoa \
+        -framework WebKit \
+        -framework Quartz \
+        -module-name "QuickMDPreview" \
+        -emit-executable \
+        -o "$ext_macos/QuickMDPreview" \
+        -Xlinker -e -Xlinker _NSExtensionMain \
+        -Xlinker -rpath -Xlinker "@executable_path/../Frameworks" \
+        -Xlinker -rpath -Xlinker "@executable_path/../../../../Frameworks" \
+        "$ql_src/PreviewViewController.swift"
+
+    # Copy extension Info.plist
+    cp "$ql_src/Info.plist" "$ext_dir/Contents/"
+
+    # Copy resources needed by extension (JS libs + CSS)
+    cp "$VENDOR_DIR/marked.umd.js" "$ext_resources/marked.min.js"
+    cp "$VENDOR_DIR/purify.min.js" "$ext_resources/purify.min.js"
+    cp "$VENDOR_DIR/mermaid.min.js" "$ext_resources/mermaid.min.js"
+    cp "$VENDOR_DIR/katex.min.js" "$ext_resources/katex.min.js"
+    cp "$VENDOR_DIR/katex.min.css" "$ext_resources/katex.min.css"
+    cp "$VENDOR_DIR/katex-auto-render.min.js" "$ext_resources/auto-render.min.js"
+    cp "$HIGHLIGHT_DIR/highlight.min.js" "$ext_resources/highlight.min.js"
+    cp "$RESOURCES_DIR/viewer.css" "$ext_resources/viewer.css"
+
+    # Write PkgInfo for extension
+    printf 'XPC!????' > "$ext_dir/Contents/PkgInfo"
+
+    printf '  Quick Look Extension built\n'
 }
 
 clean_outputs() {

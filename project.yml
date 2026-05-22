@@ -1,0 +1,116 @@
+name: QuickMD
+options:
+  bundleIdPrefix: com.quickmd
+  deploymentTarget:
+    macOS: "12.0"
+  xcodeVersion: "16.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    DEVELOPMENT_TEAM: ""
+    CODE_SIGN_STYLE: Automatic
+    CODE_SIGN_IDENTITY: "Apple Development"
+
+targets:
+  QuickMD:
+    type: application
+    platform: macOS
+    sources:
+      - path: src/main.m
+        type: file
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.quickmd.app
+        INFOPLIST_FILE: src/Info.plist
+        PRODUCT_NAME: QuickMD
+        CLANG_ENABLE_OBJC_ARC: YES
+        CLANG_MODULES_AUTOLINK: YES
+        OTHER_LDFLAGS:
+          - "-framework AppKit"
+          - "-framework WebKit"
+          - "-framework CoreServices"
+    dependencies:
+      - target: QuickMDPreview
+        embed: true
+        codeSign: true
+        copy:
+          destination: plugins
+    preBuildScripts:
+      - name: "Download Vendor Dependencies"
+        script: |
+          cd "${SRCROOT}"
+          VENDOR_DIR="${BUILT_PRODUCTS_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/vendor"
+          mkdir -p "$VENDOR_DIR"
+          
+          # Download marked
+          if [ ! -f "$VENDOR_DIR/marked.umd.js" ]; then
+            curl -sL "https://unpkg.com/marked@15.0.7/marked.min.js" -o "$VENDOR_DIR/marked.umd.js"
+          fi
+          
+          # Download DOMPurify
+          if [ ! -f "$VENDOR_DIR/purify.min.js" ]; then
+            curl -sL "https://unpkg.com/dompurify@3.3.2/dist/purify.min.js" -o "$VENDOR_DIR/purify.min.js"
+          fi
+          
+          # Download Mermaid
+          if [ ! -f "$VENDOR_DIR/mermaid.min.js" ]; then
+            curl -sL "https://unpkg.com/mermaid@11.4.1/dist/mermaid.min.js" -o "$VENDOR_DIR/mermaid.min.js"
+          fi
+          
+          # Download KaTeX
+          if [ ! -f "$VENDOR_DIR/katex.min.js" ]; then
+            curl -sL "https://unpkg.com/katex@0.16.21/dist/katex.min.js" -o "$VENDOR_DIR/katex.min.js"
+            curl -sL "https://unpkg.com/katex@0.16.21/dist/katex.min.css" -o "$VENDOR_DIR/katex.min.css"
+            curl -sL "https://unpkg.com/katex@0.16.21/dist/contrib/auto-render.min.js" -o "$VENDOR_DIR/katex-auto-render.min.js"
+          fi
+          
+          # Download highlight.js
+          if [ ! -f "$VENDOR_DIR/highlight/highlight.min.js" ]; then
+            mkdir -p "$VENDOR_DIR/highlight"
+            curl -sL "https://unpkg.com/@highlightjs/cdn-assets@11.11.1/highlight.min.js" -o "$VENDOR_DIR/highlight/highlight.min.js"
+            curl -sL "https://unpkg.com/@highlightjs/cdn-assets@11.11.1/styles/github.min.css" -o "$VENDOR_DIR/highlight/github.min.css"
+            curl -sL "https://unpkg.com/@highlightjs/cdn-assets@11.11.1/styles/github-dark.min.css" -o "$VENDOR_DIR/highlight/github-dark.min.css"
+          fi
+        basedOnDependencyAnalysis: false
+    postCompileScripts:
+      - name: "Copy Resources"
+        script: |
+          RESOURCES_DIR="${BUILT_PRODUCTS_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}"
+          cp "${SRCROOT}/src/viewer.js" "$RESOURCES_DIR/"
+          cp "${SRCROOT}/src/viewer.css" "$RESOURCES_DIR/"
+          cp "${SRCROOT}/src/QuickMDRenderer.sh" "$RESOURCES_DIR/"
+          chmod +x "$RESOURCES_DIR/QuickMDRenderer.sh"
+        basedOnDependencyAnalysis: false
+
+  QuickMDPreview:
+    type: app-extension
+    platform: macOS
+    sources:
+      - path: QuickMDPreview/PreviewViewController.swift
+        type: file
+    entitlements:
+      path: QuickMDPreview/QuickMDPreview.entitlements
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.quickmd.app.QuickMDPreview
+        INFOPLIST_FILE: QuickMDPreview/Info.plist
+        PRODUCT_NAME: QuickMDPreview
+        SWIFT_VERSION: "5.9"
+        LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/../Frameworks @executable_path/../../../../Frameworks"
+        SKIP_INSTALL: YES
+        CODE_SIGN_ENTITLEMENTS: QuickMDPreview/QuickMDPreview.entitlements
+        ENABLE_APP_SANDBOX: YES
+    dependencies:
+      - framework: QuickLook.framework
+        implicit: true
+      - framework: WebKit.framework
+        implicit: true
+
+
+schemes:
+  QuickMD:
+    build:
+      targets:
+        QuickMD: all
+        QuickMDPreview: all
