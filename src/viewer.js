@@ -376,9 +376,25 @@
   function computeTaskCheckboxOffsets(markdown) {
     const out = [];
     if (!window.marked || typeof window.marked.lexer !== "function") return out;
+
+    // marked normalizes token.raw line endings to "\n". Lex a normalized copy so raw
+    // lengths sum exactly to it, compute offsets in that space, then map each back to the
+    // original string's coordinates (which main.m reads verbatim, CRLF and all).
+    let lf = "";
+    const lfToOrig = []; // lfToOrig[i] = index in `markdown` of the i-th char of `lf`
+    for (let i = 0; i < markdown.length; i++) {
+      const ch = markdown[i];
+      if (ch === "\r") {
+        if (markdown[i + 1] === "\n") continue; // CRLF: drop the \r, keep the \n next loop
+        lfToOrig.push(i); lf += "\n"; continue; // lone CR -> \n
+      }
+      lfToOrig.push(i); lf += ch;
+    }
+    lfToOrig.push(markdown.length); // sentinel
+
     let tokens;
     try {
-      tokens = window.marked.lexer(markdown);
+      tokens = window.marked.lexer(lf);
     } catch {
       return out;
     }
@@ -389,7 +405,7 @@
           for (const item of token.items) {
             if (item.task) {
               const m = editable ? /\[[ xX]\]/.exec(item.raw) : null;
-              out.push({ offset: m ? itemBase + m.index : null });
+              out.push({ offset: m ? lfToOrig[itemBase + m.index] : null });
             }
             // Nested content: count its checkboxes (for index alignment) but mark them
             // non-editable — child token raws are normalized and don't map to source.

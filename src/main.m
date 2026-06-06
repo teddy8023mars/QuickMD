@@ -354,9 +354,12 @@ static void QMDFSEventCallback(ConstFSEventStreamRef streamRef,
                 NSString *current = [NSString stringWithContentsOfURL:controller.sourceFileURL
                                                             encoding:NSUTF8StringEncoding
                                                                error:nil];
-                if (current && [current isEqualToString:controller.expectedSelfWriteContent]) {
-                    controller.expectedSelfWriteContent = nil; // our own write; nothing to reload
-                    return;
+                NSString *expected = controller.expectedSelfWriteContent;
+                // Consume the marker on any matched event so a stale expectation can't later
+                // suppress a genuine external change that happens to equal it.
+                controller.expectedSelfWriteContent = nil;
+                if (current && [current isEqualToString:expected]) {
+                    return; // our own write; nothing to reload
                 }
             }
             [controller reloadPreview:nil];
