@@ -484,7 +484,6 @@
           { left: "\\(", right: "\\)", display: false },
         ],
         throwOnError: false,
-        trust: true,
       });
     } catch (e) {
       console.error("KaTeX error:", e);

@@ -62,7 +62,8 @@ class PreviewViewController: NSViewController, QLPreviewingController {
     // MARK: - HTML Generation
 
     private func buildPreviewHTML(markdown: String, filename: String, baseURL: URL) -> String {
-        let escapedMarkdown = escapeForJS(markdown)
+        let markdownB64 = Data(markdown.utf8).base64EncodedString()
+        let filenameB64 = Data(filename.utf8).base64EncodedString()
 
         // Load JS libraries from bundle (offline, no network needed)
         let markedJS = loadBundledResource("marked.min.js")
@@ -79,7 +80,7 @@ class PreviewViewController: NSViewController, QLPreviewingController {
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <base href="\(baseURL.absoluteString)">
-        <title>\(filename)</title>
+        <title>QuickMD Preview</title>
         <style>\(katexCSS)</style>
         <style>
         :root {
@@ -196,6 +197,7 @@ class PreviewViewController: NSViewController, QLPreviewingController {
         </head>
         <body>
         <div id="content"></div>
+        <script id="viewer-data" type="application/json">{"markdown":"\(markdownB64)","filename":"\(filenameB64)"}</script>
         <script>\(markedJS)</script>
         <script>\(purifyJS)</script>
         <script>\(highlightJS)</script>
@@ -203,8 +205,16 @@ class PreviewViewController: NSViewController, QLPreviewingController {
         <script>\(autoRenderJS)</script>
         <script>
         (function() {
+            function decodeB64(value) {
+                const binary = atob(value || "");
+                const bytes = new Uint8Array(binary.length);
+                for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+                return new TextDecoder().decode(bytes);
+            }
             try {
-                const markdown = "\(escapedMarkdown)";
+                const payload = JSON.parse(document.getElementById('viewer-data').textContent);
+                const markdown = decodeB64(payload.markdown);
+                document.title = decodeB64(payload.filename);
                 marked.setOptions({ gfm: true, breaks: false, pedantic: false });
                 const rawHtml = marked.parse(markdown);
                 const cleanHtml = DOMPurify.sanitize(rawHtml, {
@@ -214,12 +224,10 @@ class PreviewViewController: NSViewController, QLPreviewingController {
                 });
                 const contentEl = document.getElementById('content');
                 contentEl.innerHTML = cleanHtml;
-                // Highlight code blocks
                 if (window.hljs) {
                     const blocks = contentEl.querySelectorAll('pre code');
                     for (const block of blocks) window.hljs.highlightElement(block);
                 }
-                // Render math
                 if (window.renderMathInElement) {
                     renderMathInElement(contentEl, {
                         delimiters: [
@@ -231,10 +239,9 @@ class PreviewViewController: NSViewController, QLPreviewingController {
                         throwOnError: false
                     });
                 }
-                // Show content after rendering is complete
                 document.body.classList.add('ready');
-            } catch(e) {
-                document.getElementById('content').innerHTML = '<pre style="color:red;">Error: ' + e.message + '\\n' + e.stack + '</pre>';
+            } catch (e) {
+                document.getElementById('content').textContent = 'Error: ' + e.message;
                 document.body.classList.add('ready');
             }
         })();
@@ -242,17 +249,5 @@ class PreviewViewController: NSViewController, QLPreviewingController {
         </body>
         </html>
         """
-    }
-
-    private func escapeForJS(_ string: String) -> String {
-        var result = string
-        result = result.replacingOccurrences(of: "\\", with: "\\\\")
-        result = result.replacingOccurrences(of: "\"", with: "\\\"")
-        result = result.replacingOccurrences(of: "\n", with: "\\n")
-        result = result.replacingOccurrences(of: "\r", with: "\\r")
-        result = result.replacingOccurrences(of: "\t", with: "\\t")
-        result = result.replacingOccurrences(of: "\u{2028}", with: "\\u2028")
-        result = result.replacingOccurrences(of: "\u{2029}", with: "\\u2029")
-        return result
     }
 }

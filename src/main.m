@@ -40,6 +40,7 @@ static NSError *QMDMakeError(NSInteger code, NSString *description) {
 @property(nonatomic, assign) BOOL hasPendingScrollRestore;
 @property(nonatomic, assign) BOOL hasAutoResized;
 @property(nonatomic, assign) BOOL pendingTOCVisible;
+@property(nonatomic, copy) NSString *expectedSelfWriteContent;
 
 - (BOOL)openMarkdownFileURL:(NSURL *)fileURL error:(NSError **)error;
 - (void)reloadPreview:(id)sender;
@@ -349,6 +350,15 @@ static void QMDFSEventCallback(ConstFSEventStreamRef streamRef,
     for (NSUInteger i = 0; i < numEvents; i++) {
         NSString *changedName = paths[i].lastPathComponent;
         if ([changedName isEqualToString:watchedName]) {
+            if (controller.expectedSelfWriteContent) {
+                NSString *current = [NSString stringWithContentsOfURL:controller.sourceFileURL
+                                                            encoding:NSUTF8StringEncoding
+                                                               error:nil];
+                if (current && [current isEqualToString:controller.expectedSelfWriteContent]) {
+                    controller.expectedSelfWriteContent = nil; // our own write; nothing to reload
+                    return;
+                }
+            }
             [controller reloadPreview:nil];
             return;
         }
@@ -450,6 +460,33 @@ static void QMDFSEventCallback(ConstFSEventStreamRef streamRef,
 
 #pragma mark - WKScriptMessageHandler
 
+// Returns the source NSRange of each editable task checkbox marker ("[ ]" / "[x]"),
+// in render order, skipping fenced code blocks. Matches -, *, +, and ordered list markers,
+// mirroring what marked.js renders as an interactive checkbox.
+- (NSArray<NSValue *> *)taskCheckboxRangesInString:(NSString *)content {
+    NSMutableArray<NSValue *> *ranges = [NSMutableArray array];
+    NSRegularExpression *lineRegex =
+        [NSRegularExpression regularExpressionWithPattern:@"^[ \\t]*(?:[-*+]|\\d+[.)])\\s+(\\[[ xX]\\])"
+                                                  options:0
+                                                    error:nil];
+    __block BOOL inFence = NO;
+    [content enumerateSubstringsInRange:NSMakeRange(0, content.length)
+                               options:NSStringEnumerationByLines
+                            usingBlock:^(NSString *line, NSRange lineRange, NSRange enclosingRange, BOOL *stop) {
+        NSString *trimmed = [line stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+        if ([trimmed hasPrefix:@"```"] || [trimmed hasPrefix:@"~~~"]) { inFence = !inFence; return; }
+        if (inFence) return;
+        NSTextCheckingResult *m = [lineRegex firstMatchInString:line
+                                                        options:0
+                                                          range:NSMakeRange(0, line.length)];
+        if (!m) return;
+        NSRange boxInLine = [m rangeAtIndex:1]; // the "[ ]" / "[x]"
+        NSRange boxInContent = NSMakeRange(lineRange.location + boxInLine.location, boxInLine.length);
+        [ranges addObject:[NSValue valueWithRange:boxInContent]];
+    }];
+    return ranges;
+}
+
 - (void)userContentController:(WKUserContentController *)userContentController
       didReceiveScriptMessage:(WKScriptMessage *)message {
     if (![message.name isEqualToString:@"checkboxToggle"]) return;
@@ -461,38 +498,41 @@ static void QMDFSEventCallback(ConstFSEventStreamRef streamRef,
 
     if (!self.sourceFileURL) return;
 
-    NSError *error = nil;
+    NSError *readError = nil;
     NSString *content = [NSString stringWithContentsOfURL:self.sourceFileURL
                                                 encoding:NSUTF8StringEncoding
-                                                   error:&error];
-    if (error || !content) return;
+                                                   error:&readError];
+    if (readError || !content) return;
 
-    // Find the Nth task list checkbox in the markdown source
-    NSString *pattern = @"- \\[([ xX])\\]";
-    NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:pattern
-                                                                          options:0
-                                                                            error:nil];
-    NSArray<NSTextCheckingResult *> *matches = [regex matchesInString:content
-                                                             options:0
-                                                               range:NSMakeRange(0, content.length)];
+    NSArray<NSValue *> *boxes = [self taskCheckboxRangesInString:content];
+    if (checkboxIndex < 0 || checkboxIndex >= (NSInteger)boxes.count) return;
 
-    if (checkboxIndex < 0 || checkboxIndex >= (NSInteger)matches.count) return;
-
-    NSTextCheckingResult *match = matches[checkboxIndex];
-    NSRange fullRange = match.range;
-    NSString *replacement = checked ? @"- [x]" : @"- [ ]";
+    NSRange boxRange = [boxes[checkboxIndex] rangeValue];
+    NSString *replacement = checked ? @"[x]" : @"[ ]";
 
     NSMutableString *mutableContent = [content mutableCopy];
-    [mutableContent replaceCharactersInRange:fullRange withString:replacement];
+    [mutableContent replaceCharactersInRange:boxRange withString:replacement];
 
-    // Write back to file (temporarily stop watching to avoid reload loop)
-    [self stopWatchingSourceFile];
-    [mutableContent writeToURL:self.sourceFileURL atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    // Stale-write guard: if the file changed on disk since we rendered, reload instead of clobbering.
+    NSString *latest = [NSString stringWithContentsOfURL:self.sourceFileURL
+                                                encoding:NSUTF8StringEncoding
+                                                   error:nil];
+    if (latest && ![latest isEqualToString:content]) {
+        [self reloadPreview:nil];
+        return;
+    }
 
-    // Restart file watching after a longer delay to ensure FS events are flushed
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        [self startWatchingSourceFile];
-    });
+    // Record what we are about to write so the FSEvent callback can ignore our own change.
+    self.expectedSelfWriteContent = mutableContent;
+
+    NSError *writeError = nil;
+    if (![mutableContent writeToURL:self.sourceFileURL
+                         atomically:YES
+                           encoding:NSUTF8StringEncoding
+                              error:&writeError]) {
+        self.expectedSelfWriteContent = nil; // write failed; let future events reload normally
+        return;
+    }
 }
 
 #pragma mark - WKNavigationDelegate
