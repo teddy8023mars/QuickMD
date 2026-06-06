@@ -398,27 +398,44 @@
     } catch {
       return out;
     }
-    const walk = (toks, base, editable) => {
+
+    // Nested-list / blockquote checkboxes: count them (so indices stay aligned with the
+    // rendered DOM) but never emit an offset — their source is normalized by marked.
+    const countNonEditable = (toks) => {
       for (const token of toks) {
         if (token.type === "list") {
-          let itemBase = base;
           for (const item of token.items) {
-            if (item.task) {
-              const m = editable ? /\[[ xX]\]/.exec(item.raw) : null;
-              out.push({ offset: m ? lfToOrig[itemBase + m.index] : null });
-            }
-            // Nested content: count its checkboxes (for index alignment) but mark them
-            // non-editable — child token raws are normalized and don't map to source.
-            if (item.tokens) walk(item.tokens, itemBase, false);
-            itemBase += item.raw.length;
+            if (item.task) out.push({ offset: null });
+            if (item.tokens) countNonEditable(item.tokens);
           }
         } else if (token.type === "blockquote") {
-          if (token.tokens) walk(token.tokens, base, false);
+          if (token.tokens) countNonEditable(token.tokens);
         }
-        base += token.raw.length;
       }
     };
-    walk(tokens, 0, true);
+
+    // Top level: don't sum token.raw lengths — marked silently drops some constructs from
+    // the token list (e.g. link reference definitions go to tokens.links), so the sum falls
+    // behind the source. Re-sync to each token's true position by searching forward.
+    let cursor = 0;
+    for (const token of tokens) {
+      const found = lf.indexOf(token.raw, cursor);
+      const base = found >= 0 ? found : cursor;
+      if (token.type === "list") {
+        let itemBase = base; // list.items[].raw sum exactly to list.raw, so this is reliable
+        for (const item of token.items) {
+          if (item.task) {
+            const m = /\[[ xX]\]/.exec(item.raw);
+            out.push({ offset: m ? lfToOrig[itemBase + m.index] : null });
+          }
+          if (item.tokens) countNonEditable(item.tokens);
+          itemBase += item.raw.length;
+        }
+      } else if (token.type === "blockquote") {
+        if (token.tokens) countNonEditable(token.tokens);
+      }
+      cursor = base + token.raw.length;
+    }
     return out;
   }
 
