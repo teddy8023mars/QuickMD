@@ -462,18 +462,24 @@ static void QMDFSEventCallback(ConstFSEventStreamRef streamRef,
 
 // Returns the source NSRange of each editable task checkbox marker ("[ ]" / "[x]"),
 // in render order, skipping fenced code blocks. Matches -, *, +, and ordered list markers,
-// mirroring what marked.js renders as an interactive checkbox.
+// with optional blockquote (">") prefixes, mirroring what marked.js renders as an
+// interactive checkbox.
 - (NSArray<NSValue *> *)taskCheckboxRangesInString:(NSString *)content {
     NSMutableArray<NSValue *> *ranges = [NSMutableArray array];
     NSRegularExpression *lineRegex =
-        [NSRegularExpression regularExpressionWithPattern:@"^[ \\t]*(?:[-*+]|\\d+[.)])\\s+(\\[[ xX]\\])"
+        [NSRegularExpression regularExpressionWithPattern:@"^[ \\t]*(?:>[ \\t]*)*(?:[-*+]|\\d+[.)])\\s+(\\[[ xX]\\])"
                                                   options:0
                                                     error:nil];
+    NSCharacterSet *ws = NSCharacterSet.whitespaceCharacterSet;
     __block BOOL inFence = NO;
     [content enumerateSubstringsInRange:NSMakeRange(0, content.length)
                                options:NSStringEnumerationByLines
                             usingBlock:^(NSString *line, NSRange lineRange, NSRange enclosingRange, BOOL *stop) {
-        NSString *trimmed = [line stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+        // Strip leading blockquote markers so fence detection works inside blockquotes too.
+        NSString *trimmed = [line stringByTrimmingCharactersInSet:ws];
+        while ([trimmed hasPrefix:@">"]) {
+            trimmed = [[trimmed substringFromIndex:1] stringByTrimmingCharactersInSet:ws];
+        }
         if ([trimmed hasPrefix:@"```"] || [trimmed hasPrefix:@"~~~"]) { inFence = !inFence; return; }
         if (inFence) return;
         NSTextCheckingResult *m = [lineRegex firstMatchInString:line
