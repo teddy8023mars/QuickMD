@@ -15,6 +15,9 @@
   let renderedDocumentTitle = document.title;
   let mermaidRenderGeneration = 0;
   let tocVisible = false;
+  // One entry per checkbox marked renders, in render order. { offset } is the source
+  // char index of its "[ ]"/"[x]" when editable, or null when it can't be safely mapped.
+  let taskCheckboxOffsets = [];
 
   // ─── Theme Management ───────────────────────────────────────────────
 
@@ -364,14 +367,64 @@
     for (const image of images) { image.loading = "lazy"; image.decoding = "async"; }
   }
 
+  // Walk the SAME marked token stream used for rendering and record, in render order,
+  // the source char offset of every task checkbox's "[ ]"/"[x]". Only top-level list
+  // items get a real offset — nested-list and blockquote items have their source
+  // whitespace/prefixes stripped by marked, so their offsets can't be trusted; they are
+  // recorded as null (display-only). Every rendered checkbox gets exactly one entry, so
+  // entries stay index-aligned with the DOM checkboxes.
+  function computeTaskCheckboxOffsets(markdown) {
+    const out = [];
+    if (!window.marked || typeof window.marked.lexer !== "function") return out;
+    let tokens;
+    try {
+      tokens = window.marked.lexer(markdown);
+    } catch {
+      return out;
+    }
+    const walk = (toks, base, editable) => {
+      for (const token of toks) {
+        if (token.type === "list") {
+          let itemBase = base;
+          for (const item of token.items) {
+            if (item.task) {
+              const m = editable ? /\[[ xX]\]/.exec(item.raw) : null;
+              out.push({ offset: m ? itemBase + m.index : null });
+            }
+            // Nested content: count its checkboxes (for index alignment) but mark them
+            // non-editable — child token raws are normalized and don't map to source.
+            if (item.tokens) walk(item.tokens, itemBase, false);
+            itemBase += item.raw.length;
+          }
+        } else if (token.type === "blockquote") {
+          if (token.tokens) walk(token.tokens, base, false);
+        }
+        base += token.raw.length;
+      }
+    };
+    walk(tokens, 0, true);
+    return out;
+  }
+
   function enableTaskCheckboxes(root) {
     const checkboxes = root.querySelectorAll('input[type="checkbox"]');
+    // Fail safe: if our offset map doesn't line up 1:1 with what marked rendered, make
+    // every checkbox display-only rather than risk writing to the wrong source line.
+    const aligned = checkboxes.length === taskCheckboxOffsets.length;
     checkboxes.forEach((cb, index) => {
+      const entry = aligned ? taskCheckboxOffsets[index] : null;
+      if (!entry || entry.offset == null) {
+        cb.disabled = true;
+        cb.style.cursor = "default";
+        cb.title = "This checkbox is display-only (its source position can't be mapped safely).";
+        return;
+      }
       cb.disabled = false;
       cb.style.cursor = "pointer";
+      cb.title = "";
       cb.addEventListener("change", () => {
         window.webkit.messageHandlers.checkboxToggle.postMessage({
-          index: index,
+          offset: entry.offset,
           checked: cb.checked
         });
       });
@@ -567,6 +620,7 @@
 
     applyBaseUrl(baseUrl);
     renderedDocumentTitle = `QuickMD — ${filename}`;
+    taskCheckboxOffsets = computeTaskCheckboxOffsets(markdown);
 
     try {
       const rawHtml = window.marked.parse(markdown);

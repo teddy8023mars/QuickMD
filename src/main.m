@@ -460,46 +460,18 @@ static void QMDFSEventCallback(ConstFSEventStreamRef streamRef,
 
 #pragma mark - WKScriptMessageHandler
 
-// Returns the source NSRange of each editable task checkbox marker ("[ ]" / "[x]"),
-// in render order, skipping fenced code blocks. Matches -, *, +, and ordered list markers,
-// with optional blockquote (">") prefixes, mirroring what marked.js renders as an
-// interactive checkbox.
-- (NSArray<NSValue *> *)taskCheckboxRangesInString:(NSString *)content {
-    NSMutableArray<NSValue *> *ranges = [NSMutableArray array];
-    NSRegularExpression *lineRegex =
-        [NSRegularExpression regularExpressionWithPattern:@"^[ \\t]*(?:>[ \\t]*)*(?:[-*+]|\\d+[.)])\\s+(\\[[ xX]\\])"
-                                                  options:0
-                                                    error:nil];
-    NSCharacterSet *ws = NSCharacterSet.whitespaceCharacterSet;
-    __block BOOL inFence = NO;
-    [content enumerateSubstringsInRange:NSMakeRange(0, content.length)
-                               options:NSStringEnumerationByLines
-                            usingBlock:^(NSString *line, NSRange lineRange, NSRange enclosingRange, BOOL *stop) {
-        // Strip leading blockquote markers so fence detection works inside blockquotes too.
-        NSString *trimmed = [line stringByTrimmingCharactersInSet:ws];
-        while ([trimmed hasPrefix:@">"]) {
-            trimmed = [[trimmed substringFromIndex:1] stringByTrimmingCharactersInSet:ws];
-        }
-        if ([trimmed hasPrefix:@"```"] || [trimmed hasPrefix:@"~~~"]) { inFence = !inFence; return; }
-        if (inFence) return;
-        NSTextCheckingResult *m = [lineRegex firstMatchInString:line
-                                                        options:0
-                                                          range:NSMakeRange(0, line.length)];
-        if (!m) return;
-        NSRange boxInLine = [m rangeAtIndex:1]; // the "[ ]" / "[x]"
-        NSRange boxInContent = NSMakeRange(lineRange.location + boxInLine.location, boxInLine.length);
-        [ranges addObject:[NSValue valueWithRange:boxInContent]];
-    }];
-    return ranges;
-}
-
 - (void)userContentController:(WKUserContentController *)userContentController
       didReceiveScriptMessage:(WKScriptMessage *)message {
     if (![message.name isEqualToString:@"checkboxToggle"]) return;
     if (![message.body isKindOfClass:[NSDictionary class]]) return;
 
     NSDictionary *body = (NSDictionary *)message.body;
-    NSInteger checkboxIndex = [body[@"index"] integerValue];
+    // The viewer computes the exact source offset of the checkbox marker from marked's own
+    // token stream, so the native side never re-parses the Markdown. We only trust an offset
+    // that still points at a literal "[ ]"/"[x]" — otherwise we refuse to write.
+    NSNumber *offsetNumber = body[@"offset"];
+    if (![offsetNumber isKindOfClass:[NSNumber class]]) return;
+    NSInteger offset = offsetNumber.integerValue;
     BOOL checked = [body[@"checked"] boolValue];
 
     if (!self.sourceFileURL) return;
@@ -510,12 +482,22 @@ static void QMDFSEventCallback(ConstFSEventStreamRef streamRef,
                                                    error:&readError];
     if (readError || !content) return;
 
-    NSArray<NSValue *> *boxes = [self taskCheckboxRangesInString:content];
-    if (checkboxIndex < 0 || checkboxIndex >= (NSInteger)boxes.count) return;
+    if (offset < 0 || offset + 3 > (NSInteger)content.length) return;
+    NSRange boxRange = NSMakeRange((NSUInteger)offset, 3);
 
-    NSRange boxRange = [boxes[checkboxIndex] rangeValue];
+    // Safety check: the offset must still land on a checkbox marker. If the source drifted
+    // (e.g. edited since render), this fails and we abort rather than corrupt an unrelated line.
+    NSString *marker = [content substringWithRange:boxRange];
+    static NSRegularExpression *markerRegex;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        markerRegex = [NSRegularExpression regularExpressionWithPattern:@"^\\[[ xX]\\]$" options:0 error:nil];
+    });
+    if ([markerRegex numberOfMatchesInString:marker options:0 range:NSMakeRange(0, marker.length)] == 0) {
+        return;
+    }
+
     NSString *replacement = checked ? @"[x]" : @"[ ]";
-
     NSMutableString *mutableContent = [content mutableCopy];
     [mutableContent replaceCharactersInRange:boxRange withString:replacement];
 
