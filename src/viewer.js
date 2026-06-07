@@ -524,25 +524,10 @@
     return out;
   }
 
-  // A GFM task-list checkbox is rendered by marked as the first element of an <li> (tight
-  // lists) or of the <li>'s leading <p> (loose lists). Any other input[type=checkbox] is
-  // raw HTML from the document and must be ignored so it doesn't shift the index mapping.
-  function isTaskCheckbox(cb) {
-    const parent = cb.parentElement;
-    if (!parent || cb !== parent.firstElementChild) return false;
-    if (parent.tagName === "LI") return true;
-    if (parent.tagName === "P") {
-      const li = parent.parentElement;
-      return !!li && li.tagName === "LI" && li.firstElementChild === parent;
-    }
-    return false;
-  }
-
   function enableTaskCheckboxes(root) {
-    const checkboxes = Array.prototype.filter.call(
-      root.querySelectorAll('input[type="checkbox"]'),
-      isTaskCheckbox
-    );
+    // Only inputs tagged by our marked renderer are GFM task-list checkboxes; raw HTML
+    // <input> in the document is left untouched so it can't shift the index mapping.
+    const checkboxes = root.querySelectorAll('input[type="checkbox"][data-qmd-task]');
     // Fail safe: if our offset map doesn't line up 1:1 with what marked rendered, make
     // every checkbox display-only rather than risk writing to the wrong source line.
     const aligned = checkboxes.length === taskCheckboxOffsets.length;
@@ -734,6 +719,20 @@
       headerIds: true,
       mangle: false,
     });
+
+    // Tag GFM task-list checkboxes so the toggle wiring can tell them apart from raw HTML
+    // <input> in the document (which marked passes through verbatim). Only these tagged
+    // inputs map 1:1 to taskCheckboxOffsets. data-* survives DOMPurify (ALLOW_DATA_ATTR).
+    if (typeof window.marked.use === "function") {
+      window.marked.use({
+        renderer: {
+          checkbox(arg) {
+            const checked = typeof arg === "object" && arg !== null ? arg.checked : arg;
+            return `<input data-qmd-task="" ${checked ? 'checked="" ' : ""}disabled="" type="checkbox"> `;
+          },
+        },
+      });
+    }
   }
 
   // ─── Main Init ─────────────────────────────────────────────────────
