@@ -32,7 +32,8 @@ function computeTaskCheckboxOffsets(markdown) {
 
   const maskLinkDefinitions = (text, links) => {
     if (!links) return text;
-    const labels = new Set(Object.keys(links).map((l) => l.toLowerCase()));
+    const normLabel = (l) => l.trim().replace(/\s+/g, " ").toLowerCase();
+    const labels = new Set(Object.keys(links).map(normLabel));
     if (!labels.size) return text;
     const chars = text.split("");
     const n = text.length;
@@ -64,7 +65,7 @@ function computeTaskCheckboxOffsets(markdown) {
         const close = text.indexOf("]:", j + 1);
         const nl = text.indexOf("\n", j + 1);
         if (close > j && (nl < 0 || close < nl)) {
-          const label = text.slice(j + 1, close).trim().toLowerCase();
+          const label = normLabel(text.slice(j + 1, close));
           if (label && labels.has(label)) {
             let k = skipWs(close + 2);
             if (text[k] === "\n") k = skipWs(k + 1);
@@ -187,6 +188,8 @@ check("link-def-escaped-title-collision", '[r]: https://e "a \\" b\n* [ ] task"\
 // A code fence containing a def-look-alike line for a label that IS defined elsewhere must
 // not be blanked, or the code token's raw goes unfound and later offsets drift.
 check("def-lookalike-inside-fence", '[ref]: https://e\n\n```\n[ref]: x\n- [ ] fake\n```\n\n- [ ] real\n', { minEditable: 1, editableAtLastMarker: true });
+// Label with collapsed internal whitespace must normalize to match marked's key and be masked.
+check("def-collapsed-label-collision", '[a  b]: https://e "x\n- [ ] task"\n\n- [ ] task\n', { minEditable: 1, editableAtLastMarker: true });
 
 if (!ok) process.exit(1);
 console.log("PASS: offsets align and hit real markers across LF/CRLF/link-def cases; nested/blockquote display-only");

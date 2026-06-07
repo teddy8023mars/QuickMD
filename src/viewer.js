@@ -390,7 +390,10 @@
   // Newlines are preserved so character positions stay aligned with the original.
   function maskLinkDefinitions(text, links) {
     if (!links) return text;
-    const labels = new Set(Object.keys(links).map((l) => l.toLowerCase()));
+    // CommonMark label matching: case-fold, trim, and collapse internal whitespace runs to a
+    // single space — the same normalization marked applies to its tokens.links keys.
+    const normLabel = (l) => l.trim().replace(/\s+/g, " ").toLowerCase();
+    const labels = new Set(Object.keys(links).map(normLabel));
     if (!labels.size) return text;
     const chars = text.split("");
     const n = text.length;
@@ -426,7 +429,7 @@
         const close = text.indexOf("]:", j + 1);
         const nl = text.indexOf("\n", j + 1);
         if (close > j && (nl < 0 || close < nl)) {
-          const label = text.slice(j + 1, close).trim().toLowerCase();
+          const label = normLabel(text.slice(j + 1, close));
           if (label && labels.has(label)) {
             let k = skipWs(close + 2);
             if (text[k] === "\n") k = skipWs(k + 1); // destination may start on the next line
