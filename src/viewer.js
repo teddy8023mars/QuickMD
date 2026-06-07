@@ -382,82 +382,6 @@
     for (const image of images) { image.loading = "lazy"; image.decoding = "async"; }
   }
 
-  // Blank out link reference definition blocks (which marked drops from the token list)
-  // with same-length spaces so the forward search can't match a token's raw inside a
-  // definition's destination/title. This is a full CommonMark link-definition consumer:
-  // it handles destinations and titles that sit on the same line or wrap onto following
-  // lines, `<...>` destinations, and `"..."` / `'...'` / `(...)` titles incl. multiline.
-  // Newlines are preserved so character positions stay aligned with the original.
-  function maskLinkDefinitions(text, links) {
-    if (!links) return text;
-    // CommonMark label matching: case-fold, trim, and collapse internal whitespace runs to a
-    // single space — the same normalization marked applies to its tokens.links keys.
-    const normLabel = (l) => l.trim().replace(/\s+/g, " ").toLowerCase();
-    const labels = new Set(Object.keys(links).map(normLabel));
-    if (!labels.size) return text;
-    const chars = text.split("");
-    const n = text.length;
-    const isWs = (c) => c === " " || c === "\t";
-    const skipWs = (p) => { while (p < n && isWs(text[p])) p++; return p; };
-    const blank = (a, b) => { for (let p = a; p < b && p < n; p++) if (text[p] !== "\n") chars[p] = " "; };
-
-    let i = 0;
-    let fence = null; // { char, len } while inside a ``` / ~~~ fenced code block
-    while (i < n) {
-      const lineStart = i;
-      let lineEnd = text.indexOf("\n", i);
-      if (lineEnd < 0) lineEnd = n;
-      // Track fenced code blocks: their contents are real tokens, never link definitions,
-      // so they must not be blanked even if a line looks like `[ref]: ...`.
-      let s = lineStart, fsp = 0;
-      while (s < lineEnd && text[s] === " " && fsp < 3) { s++; fsp++; }
-      const fch = text[s];
-      let runLen = 0;
-      if (fch === "`" || fch === "~") { let p = s; while (p < lineEnd && text[p] === fch) { runLen++; p++; } }
-      const isFence = runLen >= 3;
-      if (fence) {
-        if (isFence && fch === fence.char && runLen >= fence.len) fence = null; // closing fence
-        i = lineEnd + 1;
-        continue;
-      }
-      if (isFence) { fence = { char: fch, len: runLen }; i = lineEnd + 1; continue; }
-
-      let j = lineStart, spaces = 0;
-      while (j < n && text[j] === " " && spaces < 3) { j++; spaces++; } // up to 3 leading spaces
-      let consumedTo = -1;
-      if (text[j] === "[") {
-        const close = text.indexOf("]:", j + 1);
-        const nl = text.indexOf("\n", j + 1);
-        if (close > j && (nl < 0 || close < nl)) {
-          const label = normLabel(text.slice(j + 1, close));
-          if (label && labels.has(label)) {
-            let k = skipWs(close + 2);
-            if (text[k] === "\n") k = skipWs(k + 1); // destination may start on the next line
-            if (text[k] === "<") { const e = text.indexOf(">", k + 1); k = e < 0 ? n : e + 1; }
-            else { while (k < n && !/\s/.test(text[k])) k++; }
-            consumedTo = k;
-            let m = skipWs(k), nlBefore = false;
-            if (text[m] === "\n") { nlBefore = true; m = skipWs(m + 1); } // title may start next line
-            const t = text[m];
-            if (t === '"' || t === "'" || t === "(") {
-              const closer = t === "(" ? ")" : t;
-              let e = -1; // first UNescaped closer (CommonMark titles allow backslash escapes)
-              for (let p = m + 1; p < n; p++) {
-                if (text[p] === "\\") { p++; continue; }
-                if (text[p] === closer) { e = p; break; }
-              }
-              if (e >= 0) consumedTo = e + 1; // title (possibly multiline) is part of the def
-            } else if (nlBefore) { /* newline then no title: def ends at the destination */ }
-          }
-        }
-      }
-      if (consumedTo >= 0) { blank(lineStart, consumedTo); i = consumedTo; }
-      while (i < n && text[i] !== "\n") i++; // advance to next line start
-      if (i < n) i++;
-    }
-    return chars.join("");
-  }
-
   // Walk the SAME marked token stream used for rendering and record, in render order,
   // the source char offset of every task checkbox's "[ ]"/"[x]". Only top-level list
   // items get a real offset — nested-list and blockquote items have their source
@@ -490,11 +414,66 @@
       return out;
     }
 
-    // Blank out link reference definition blocks (which marked drops from the token list)
-    // with same-length spaces, so the forward search below can't match a token's raw text
-    // that happens to also appear inside a definition's destination/title. Positions are
-    // preserved, so offsets remain valid against the original string.
-    const searchSpace = maskLinkDefinitions(lf, tokens.links);
+    // Position each top-level token by CONSUMING the source rather than searching for it.
+    // marked drops only link reference definitions from the top-level stream (everything
+    // else, incl. blank lines, is a token), so between tokens we skip exactly those dropped
+    // definition blocks; every token's raw then sits at the cursor verbatim. A definition
+    // nested inside a list is part of that list's raw and is consumed wholesale, so it never
+    // needs separate handling. This avoids the ambiguity of substring search entirely.
+    const n = lf.length;
+    const isWs = (c) => c === " " || c === "\t";
+    const skipWs = (p) => { while (p < n && isWs(lf[p])) p++; return p; };
+    const normLabel = (l) => l.trim().replace(/\s+/g, " ").toLowerCase();
+    const labels = new Set(Object.keys(tokens.links || {}).map(normLabel));
+
+    // If a link reference definition for a known label starts at line position `pos`, return
+    // the index just past its content; otherwise -1. Handles same-line/next-line destinations
+    // and "..."/'...'/(...) titles incl. multiline and backslash-escaped delimiters.
+    const defEnd = (pos) => {
+      let j = pos, sp = 0;
+      while (j < n && lf[j] === " " && sp < 3) { j++; sp++; } // up to 3 leading spaces
+      if (lf[j] !== "[") return -1;
+      const close = lf.indexOf("]:", j + 1);
+      const nl = lf.indexOf("\n", j + 1);
+      if (close < 0 || (nl >= 0 && close > nl)) return -1; // label must be on one line
+      if (!labels.has(normLabel(lf.slice(j + 1, close)))) return -1;
+      let k = skipWs(close + 2);
+      if (lf[k] === "\n") k = skipWs(k + 1); // destination may start on the next line
+      if (lf[k] === "<") { const e = lf.indexOf(">", k + 1); k = e < 0 ? n : e + 1; }
+      else { while (k < n && !/\s/.test(lf[k])) k++; }
+      let end = k;
+      let m = skipWs(k), nlBefore = false;
+      if (lf[m] === "\n") { nlBefore = true; m = skipWs(m + 1); } // title may start next line
+      const t = lf[m];
+      if (t === '"' || t === "'" || t === "(") {
+        const closer = t === "(" ? ")" : t;
+        for (let p = m + 1; p < n; p++) {
+          if (lf[p] === "\\") { p++; continue; }
+          if (lf[p] === closer) { end = p + 1; break; }
+        }
+      } else if (nlBefore) { /* newline then no title: def ends at the destination */ }
+      return end;
+    };
+
+    // Skip consecutive dropped definition blocks (and their trailing blank lines) at `pos`.
+    const skipDroppedDefs = (pos) => {
+      for (;;) {
+        const end = defEnd(pos);
+        if (end < 0) break;
+        let p = end;
+        while (p < n && lf[p] !== "\n") p++; // to end of the definition's last line
+        if (p < n) p++;
+        for (;;) { // skip following blank lines
+          let q = p;
+          while (q < n && lf[q] !== "\n" && isWs(lf[q])) q++;
+          if (q < n && lf[q] === "\n") { p = q + 1; continue; }
+          if (q >= n) p = n;
+          break;
+        }
+        pos = p;
+      }
+      return pos;
+    };
 
     // Nested-list / blockquote checkboxes: count them (so indices stay aligned with the
     // rendered DOM) but never emit an offset — their source is normalized by marked.
@@ -511,22 +490,22 @@
       }
     };
 
-    // Top level: don't sum token.raw lengths — marked silently drops some constructs from
-    // the token list (e.g. link reference definitions go to tokens.links), so the sum falls
-    // behind the source. Re-sync to each token's true position by searching forward, but
-    // only accept a match at a line start: a block token always begins a line in the real
-    // source, whereas the same text appearing inside dropped content (e.g. a link
-    // definition's title) sits mid-line, so anchoring rejects those false matches.
     let cursor = 0;
     for (const token of tokens) {
-      let base = -1;
-      for (let from = cursor; ; ) {
-        const idx = searchSpace.indexOf(token.raw, from);
-        if (idx < 0) break;
-        if (idx === 0 || searchSpace[idx - 1] === "\n") { base = idx; break; }
-        from = idx + 1;
+      cursor = skipDroppedDefs(cursor);
+      let base;
+      if (lf.startsWith(token.raw, cursor)) {
+        base = cursor;
+      } else {
+        // Defensive resync (should not happen): line-anchored forward search.
+        base = cursor;
+        for (let from = cursor; ; ) {
+          const idx = lf.indexOf(token.raw, from);
+          if (idx < 0) break;
+          if (idx === 0 || lf[idx - 1] === "\n") { base = idx; break; }
+          from = idx + 1;
+        }
       }
-      if (base < 0) base = cursor; // fallback; main.m's marker check still guards the write
       if (token.type === "list") {
         let itemBase = base; // list.items[].raw sum exactly to list.raw, so this is reliable
         for (const item of token.items) {

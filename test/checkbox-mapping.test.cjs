@@ -30,70 +30,56 @@ function computeTaskCheckboxOffsets(markdown) {
 
   const tokens = marked.lexer(lf);
 
-  const maskLinkDefinitions = (text, links) => {
-    if (!links) return text;
-    const normLabel = (l) => l.trim().replace(/\s+/g, " ").toLowerCase();
-    const labels = new Set(Object.keys(links).map(normLabel));
-    if (!labels.size) return text;
-    const chars = text.split("");
-    const n = text.length;
-    const isWs = (c) => c === " " || c === "\t";
-    const skipWs = (p) => { while (p < n && isWs(text[p])) p++; return p; };
-    const blank = (a, b) => { for (let p = a; p < b && p < n; p++) if (text[p] !== "\n") chars[p] = " "; };
-    let i = 0;
-    let fence = null;
-    while (i < n) {
-      const lineStart = i;
-      let lineEnd = text.indexOf("\n", i);
-      if (lineEnd < 0) lineEnd = n;
-      let s = lineStart, fsp = 0;
-      while (s < lineEnd && text[s] === " " && fsp < 3) { s++; fsp++; }
-      const fch = text[s];
-      let runLen = 0;
-      if (fch === "`" || fch === "~") { let p = s; while (p < lineEnd && text[p] === fch) { runLen++; p++; } }
-      const isFence = runLen >= 3;
-      if (fence) {
-        if (isFence && fch === fence.char && runLen >= fence.len) fence = null;
-        i = lineEnd + 1; continue;
-      }
-      if (isFence) { fence = { char: fch, len: runLen }; i = lineEnd + 1; continue; }
+  const n = lf.length;
+  const isWs = (c) => c === " " || c === "\t";
+  const skipWs = (p) => { while (p < n && isWs(lf[p])) p++; return p; };
+  const normLabel = (l) => l.trim().replace(/\s+/g, " ").toLowerCase();
+  const labels = new Set(Object.keys(tokens.links || {}).map(normLabel));
 
-      let j = lineStart, spaces = 0;
-      while (j < n && text[j] === " " && spaces < 3) { j++; spaces++; }
-      let consumedTo = -1;
-      if (text[j] === "[") {
-        const close = text.indexOf("]:", j + 1);
-        const nl = text.indexOf("\n", j + 1);
-        if (close > j && (nl < 0 || close < nl)) {
-          const label = normLabel(text.slice(j + 1, close));
-          if (label && labels.has(label)) {
-            let k = skipWs(close + 2);
-            if (text[k] === "\n") k = skipWs(k + 1);
-            if (text[k] === "<") { const e = text.indexOf(">", k + 1); k = e < 0 ? n : e + 1; }
-            else { while (k < n && !/\s/.test(text[k])) k++; }
-            consumedTo = k;
-            let m = skipWs(k), nlBefore = false;
-            if (text[m] === "\n") { nlBefore = true; m = skipWs(m + 1); }
-            const t = text[m];
-            if (t === '"' || t === "'" || t === "(") {
-              const closer = t === "(" ? ")" : t;
-              let e = -1;
-              for (let p = m + 1; p < n; p++) {
-                if (text[p] === "\\") { p++; continue; }
-                if (text[p] === closer) { e = p; break; }
-              }
-              if (e >= 0) consumedTo = e + 1;
-            } else if (nlBefore) { /* def ends at destination */ }
-          }
-        }
+  const defEnd = (pos) => {
+    let j = pos, sp = 0;
+    while (j < n && lf[j] === " " && sp < 3) { j++; sp++; }
+    if (lf[j] !== "[") return -1;
+    const close = lf.indexOf("]:", j + 1);
+    const nl = lf.indexOf("\n", j + 1);
+    if (close < 0 || (nl >= 0 && close > nl)) return -1;
+    if (!labels.has(normLabel(lf.slice(j + 1, close)))) return -1;
+    let k = skipWs(close + 2);
+    if (lf[k] === "\n") k = skipWs(k + 1);
+    if (lf[k] === "<") { const e = lf.indexOf(">", k + 1); k = e < 0 ? n : e + 1; }
+    else { while (k < n && !/\s/.test(lf[k])) k++; }
+    let end = k;
+    let m = skipWs(k), nlBefore = false;
+    if (lf[m] === "\n") { nlBefore = true; m = skipWs(m + 1); }
+    const t = lf[m];
+    if (t === '"' || t === "'" || t === "(") {
+      const closer = t === "(" ? ")" : t;
+      for (let p = m + 1; p < n; p++) {
+        if (lf[p] === "\\") { p++; continue; }
+        if (lf[p] === closer) { end = p + 1; break; }
       }
-      if (consumedTo >= 0) { blank(lineStart, consumedTo); i = consumedTo; }
-      while (i < n && text[i] !== "\n") i++;
-      if (i < n) i++;
-    }
-    return chars.join("");
+    } else if (nlBefore) { /* def ends at destination */ }
+    return end;
   };
-  const searchSpace = maskLinkDefinitions(lf, tokens.links);
+
+  const skipDroppedDefs = (pos) => {
+    for (;;) {
+      const end = defEnd(pos);
+      if (end < 0) break;
+      let p = end;
+      while (p < n && lf[p] !== "\n") p++;
+      if (p < n) p++;
+      for (;;) {
+        let q = p;
+        while (q < n && lf[q] !== "\n" && isWs(lf[q])) q++;
+        if (q < n && lf[q] === "\n") { p = q + 1; continue; }
+        if (q >= n) p = n;
+        break;
+      }
+      pos = p;
+    }
+    return pos;
+  };
 
   const countNonEditable = (toks) => {
     for (const token of toks) {
@@ -110,14 +96,19 @@ function computeTaskCheckboxOffsets(markdown) {
 
   let cursor = 0;
   for (const token of tokens) {
-    let base = -1;
-    for (let from = cursor; ; ) {
-      const idx = searchSpace.indexOf(token.raw, from);
-      if (idx < 0) break;
-      if (idx === 0 || searchSpace[idx - 1] === "\n") { base = idx; break; }
-      from = idx + 1;
+    cursor = skipDroppedDefs(cursor);
+    let base;
+    if (lf.startsWith(token.raw, cursor)) {
+      base = cursor;
+    } else {
+      base = cursor;
+      for (let from = cursor; ; ) {
+        const idx = lf.indexOf(token.raw, from);
+        if (idx < 0) break;
+        if (idx === 0 || lf[idx - 1] === "\n") { base = idx; break; }
+        from = idx + 1;
+      }
     }
-    if (base < 0) base = cursor;
     if (token.type === "list") {
       let itemBase = base;
       for (const item of token.items) {
