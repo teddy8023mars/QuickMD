@@ -44,8 +44,14 @@ function computeTaskCheckboxOffsets(markdown) {
 
   let cursor = 0;
   for (const token of tokens) {
-    const found = lf.indexOf(token.raw, cursor);
-    const base = found >= 0 ? found : cursor;
+    let base = -1;
+    for (let from = cursor; ; ) {
+      const idx = lf.indexOf(token.raw, from);
+      if (idx < 0) break;
+      if (idx === 0 || lf[idx - 1] === "\n") { base = idx; break; }
+      from = idx + 1;
+    }
+    if (base < 0) base = cursor;
     if (token.type === "list") {
       let itemBase = base;
       for (const item of token.items) {
@@ -91,6 +97,10 @@ check("CRLF", md.replace(/\r\n/g, "\n").replace(/\n/g, "\r\n"), { minReadonly: 2
 
 // Link reference definitions emit no token — offsets must still land on real markers.
 check("link-defs", '[ref]: https://example.com "x"\n[a]: https://a.example\n\n- [ ] first\n- [ ] second\n', { minEditable: 2 });
+
+// Adversarial: a link-definition title that contains the exact raw of the real task below.
+// indexOf must skip the in-title (mid-line) match and anchor to the real task at line start.
+check("link-def-title-collision", '[r]: https://e "* [ ] task"\n\n* [ ] task\n', { minEditable: 1 });
 
 if (!ok) process.exit(1);
 console.log("PASS: offsets align and hit real markers across LF/CRLF/link-def cases; nested/blockquote display-only");

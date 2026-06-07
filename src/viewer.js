@@ -416,11 +416,20 @@
 
     // Top level: don't sum token.raw lengths — marked silently drops some constructs from
     // the token list (e.g. link reference definitions go to tokens.links), so the sum falls
-    // behind the source. Re-sync to each token's true position by searching forward.
+    // behind the source. Re-sync to each token's true position by searching forward, but
+    // only accept a match at a line start: a block token always begins a line in the real
+    // source, whereas the same text appearing inside dropped content (e.g. a link
+    // definition's title) sits mid-line, so anchoring rejects those false matches.
     let cursor = 0;
     for (const token of tokens) {
-      const found = lf.indexOf(token.raw, cursor);
-      const base = found >= 0 ? found : cursor;
+      let base = -1;
+      for (let from = cursor; ; ) {
+        const idx = lf.indexOf(token.raw, from);
+        if (idx < 0) break;
+        if (idx === 0 || lf[idx - 1] === "\n") { base = idx; break; }
+        from = idx + 1;
+      }
+      if (base < 0) base = cursor; // fallback; main.m's marker check still guards the write
       if (token.type === "list") {
         let itemBase = base; // list.items[].raw sum exactly to list.raw, so this is reliable
         for (const item of token.items) {
