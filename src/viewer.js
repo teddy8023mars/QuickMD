@@ -420,7 +420,11 @@
             const t = text[m];
             if (t === '"' || t === "'" || t === "(") {
               const closer = t === "(" ? ")" : t;
-              const e = text.indexOf(closer, m + 1);
+              let e = -1; // first UNescaped closer (CommonMark titles allow backslash escapes)
+              for (let p = m + 1; p < n; p++) {
+                if (text[p] === "\\") { p++; continue; }
+                if (text[p] === closer) { e = p; break; }
+              }
               if (e >= 0) consumedTo = e + 1; // title (possibly multiline) is part of the def
             } else if (nlBefore) { /* newline then no title: def ends at the destination */ }
           }

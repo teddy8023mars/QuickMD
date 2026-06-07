@@ -61,7 +61,11 @@ function computeTaskCheckboxOffsets(markdown) {
             const t = text[m];
             if (t === '"' || t === "'" || t === "(") {
               const closer = t === "(" ? ")" : t;
-              const e = text.indexOf(closer, m + 1);
+              let e = -1;
+              for (let p = m + 1; p < n; p++) {
+                if (text[p] === "\\") { p++; continue; }
+                if (text[p] === closer) { e = p; break; }
+              }
               if (e >= 0) consumedTo = e + 1;
             } else if (nlBefore) { /* def ends at destination */ }
           }
@@ -163,6 +167,8 @@ check("link-def-nextline-dest-collision", '[r]:\n  https://e\n  "x\n* [ ] task\n
 // `<...>` destination and `(...)` title forms.
 check("link-def-angle-dest-collision", '[r]: <https://e> "* [ ] task"\n\n* [ ] task\n', { minEditable: 1, editableAtLastMarker: true });
 check("link-def-paren-title-collision", '[r]: https://e (* [ ] task)\n\n* [ ] task\n', { minEditable: 1, editableAtLastMarker: true });
+// Escaped delimiter inside the title must not be treated as the title's end.
+check("link-def-escaped-title-collision", '[r]: https://e "a \\" b\n* [ ] task"\n\n* [ ] task\n', { minEditable: 1, editableAtLastMarker: true });
 
 if (!ok) process.exit(1);
 console.log("PASS: offsets align and hit real markers across LF/CRLF/link-def cases; nested/blockquote display-only");
