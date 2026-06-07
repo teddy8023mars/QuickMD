@@ -35,24 +35,39 @@ function computeTaskCheckboxOffsets(markdown) {
     const labels = new Set(Object.keys(links).map((l) => l.toLowerCase()));
     if (!labels.size) return text;
     const lines = text.split("\n");
-    const defOpen = /^ {0,3}\[([^\]]+)\]:\s*(.*)$/;
+    const defOpen = /^ {0,3}\[([^\]]+)\]:[ \t]*(.*)$/;
+    const lineTitle = /^[ \t]*(["'(])/;
+    const blank = (s) => " ".repeat(s.length);
+    let state = "scan";
     let closing = null;
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
-      if (closing !== null) {
+      if (state === "inTitle") {
         const hit = line.indexOf(closing) >= 0;
-        lines[i] = " ".repeat(line.length);
-        if (hit) closing = null;
+        lines[i] = blank(line);
+        if (hit) state = "scan";
         continue;
+      }
+      if (state === "maybeTitle") {
+        const t = lineTitle.exec(line);
+        state = "scan";
+        if (t) {
+          const delim = t[1] === "(" ? ")" : t[1];
+          lines[i] = blank(line);
+          if (line.slice(t.index + t[0].length).indexOf(delim) < 0) { state = "inTitle"; closing = delim; }
+          continue;
+        }
       }
       const m = defOpen.exec(line);
       if (!m || !labels.has(m[1].trim().toLowerCase())) continue;
-      lines[i] = " ".repeat(line.length);
+      lines[i] = blank(line);
       const tail = m[2];
       const opener = /(^|\s)(["'(])/.exec(tail);
       if (opener) {
         const delim = opener[2] === "(" ? ")" : opener[2];
-        if (tail.slice(opener.index + opener[0].length).indexOf(delim) < 0) closing = delim;
+        if (tail.slice(opener.index + opener[0].length).indexOf(delim) < 0) { state = "inTitle"; closing = delim; }
+      } else if (tail.trim().length > 0) {
+        state = "maybeTitle";
       }
     }
     return lines.join("\n");
@@ -140,6 +155,8 @@ check("link-defs", '[ref]: https://example.com "x"\n[a]: https://a.example\n\n- 
 // Masking the definition block must steer the match to the real task, single- and multi-line.
 check("link-def-title-collision", '[r]: https://e "* [ ] task"\n\n* [ ] task\n', { minEditable: 1, editableAtLastMarker: true });
 check("link-def-multiline-title-collision", '[r]: https://e "line1\n- [ ] task"\n\n- [ ] task\n', { minEditable: 1, editableAtLastMarker: true });
+// Title that begins on the line AFTER the destination, spanning a task-identical line.
+check("link-def-nextline-title-collision", '[r]: https://e\n"line1\n- [ ] task"\n\n- [ ] task\n', { minEditable: 1, editableAtLastMarker: true });
 
 if (!ok) process.exit(1);
 console.log("PASS: offsets align and hit real markers across LF/CRLF/link-def cases; nested/blockquote display-only");

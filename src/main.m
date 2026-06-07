@@ -18,6 +18,24 @@ static BOOL QMDURLLooksLikeMarkdown(NSURL *url) {
     return [QMDMarkdownExtensions() containsObject:url.pathExtension.lowercaseString];
 }
 
+// FNV-1a over UTF-16 code units. Mirrors hashSource() in viewer.js byte-for-byte so the
+// native side can confirm the on-disk file is exactly what the preview was rendered from.
+static uint32_t QMDHashUTF16(NSString *string) {
+    NSUInteger length = string.length;
+    uint32_t hash = 0x811c9dc5u;
+    if (length == 0) return hash;
+    unichar *buffer = (unichar *)malloc(length * sizeof(unichar));
+    if (!buffer) return hash;
+    [string getCharacters:buffer range:NSMakeRange(0, length)];
+    for (NSUInteger i = 0; i < length; i++) {
+        unichar c = buffer[i];
+        hash = (hash ^ (c & 0xff)) * 0x01000193u;
+        hash = (hash ^ ((c >> 8) & 0xff)) * 0x01000193u;
+    }
+    free(buffer);
+    return hash;
+}
+
 static NSError *QMDMakeError(NSInteger code, NSString *description) {
     return [NSError errorWithDomain:QMDErrorDomain
                                code:code
@@ -41,7 +59,6 @@ static NSError *QMDMakeError(NSInteger code, NSString *description) {
 @property(nonatomic, assign) BOOL hasAutoResized;
 @property(nonatomic, assign) BOOL pendingTOCVisible;
 @property(nonatomic, copy) NSString *expectedSelfWriteContent;
-@property(nonatomic, copy) NSString *renderedSourceSnapshot;
 
 - (BOOL)openMarkdownFileURL:(NSURL *)fileURL error:(NSError **)error;
 - (void)reloadPreview:(id)sender;
@@ -204,13 +221,7 @@ static NSError *QMDMakeError(NSInteger code, NSString *description) {
     self.previewFileURL = previewURL;
     self.previewReady = NO;
     self.lastExportedPDFURL = nil;
-    // Snapshot the exact bytes the preview is being rendered from. Checkbox offsets posted
-    // by the viewer are only valid against this content, so a toggle is rejected if the file
-    // has since changed (the FSEvent reload will catch up instead).
     self.expectedSelfWriteContent = nil;
-    self.renderedSourceSnapshot = [NSString stringWithContentsOfURL:standardURL
-                                                           encoding:NSUTF8StringEncoding
-                                                              error:nil];
 
     self.window.title = [NSString stringWithFormat:@"QuickMD — %@", standardURL.lastPathComponent];
     self.window.representedURL = standardURL;
@@ -478,10 +489,14 @@ static void QMDFSEventCallback(ConstFSEventStreamRef streamRef,
 
     NSDictionary *body = (NSDictionary *)message.body;
     // The viewer computes the exact source offset of the checkbox marker from marked's own
-    // token stream, so the native side never re-parses the Markdown. We only trust an offset
-    // that still points at a literal "[ ]"/"[x]" — otherwise we refuse to write.
+    // token stream, so the native side never re-parses the Markdown. It also sends a hash of
+    // the exact source it mapped against; we only write when the file still matches that hash,
+    // and only when the offset still points at a literal "[ ]"/"[x]".
     NSNumber *offsetNumber = body[@"offset"];
+    NSNumber *hashNumber = body[@"hash"];
+    NSNumber *lengthNumber = body[@"length"];
     if (![offsetNumber isKindOfClass:[NSNumber class]]) return;
+    if (![hashNumber isKindOfClass:[NSNumber class]] || ![lengthNumber isKindOfClass:[NSNumber class]]) return;
     NSInteger offset = offsetNumber.integerValue;
     BOOL checked = [body[@"checked"] boolValue];
 
@@ -493,10 +508,11 @@ static void QMDFSEventCallback(ConstFSEventStreamRef streamRef,
                                                    error:&readError];
     if (readError || !content) return;
 
-    // The posted offset is only valid against the exact content the preview was rendered
-    // from. If the file changed since then (an external edit whose reload hasn't landed yet),
+    // The posted offset is only valid against the exact bytes the viewer rendered. If the
+    // file no longer matches that content (an external edit whose reload hasn't landed yet),
     // the DOM is stale — reload instead of applying a stale offset to different bytes.
-    if (self.renderedSourceSnapshot && ![content isEqualToString:self.renderedSourceSnapshot]) {
+    if ((NSInteger)content.length != lengthNumber.integerValue ||
+        QMDHashUTF16(content) != (uint32_t)hashNumber.unsignedIntValue) {
         [self reloadPreview:nil];
         return;
     }
@@ -531,11 +547,6 @@ static void QMDFSEventCallback(ConstFSEventStreamRef streamRef,
         self.expectedSelfWriteContent = nil; // write failed; let future events reload normally
         return;
     }
-
-    // The DOM still matches (only the toggled marker changed, offsets are unaffected), so
-    // advance the snapshot to the written content — otherwise the next toggle would see a
-    // mismatch and needlessly reload.
-    self.renderedSourceSnapshot = mutableContent;
 }
 
 #pragma mark - WKNavigationDelegate

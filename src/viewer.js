@@ -18,6 +18,21 @@
   // One entry per checkbox marked renders, in render order. { offset } is the source
   // char index of its "[ ]"/"[x]" when editable, or null when it can't be safely mapped.
   let taskCheckboxOffsets = [];
+  // The exact markdown this preview was rendered from. Sent (as a hash) with every checkbox
+  // toggle so the native side only writes when the file still matches what we mapped offsets
+  // against. Kept in sync with our own toggles so consecutive clicks don't force reloads.
+  let sourceMarkdown = "";
+
+  // FNV-1a over UTF-16 code units; mirrored byte-for-byte by QMDHashUTF16 in main.m.
+  function hashSource(str) {
+    let h = 0x811c9dc5 >>> 0;
+    for (let i = 0; i < str.length; i++) {
+      const c = str.charCodeAt(i);
+      h = (Math.imul(h ^ (c & 0xff), 0x01000193)) >>> 0;
+      h = (Math.imul(h ^ ((c >> 8) & 0xff), 0x01000193)) >>> 0;
+    }
+    return h >>> 0;
+  }
 
   // ─── Theme Management ───────────────────────────────────────────────
 
@@ -367,6 +382,54 @@
     for (const image of images) { image.loading = "lazy"; image.decoding = "async"; }
   }
 
+  // Blank out link reference definition blocks (which marked drops from the token list)
+  // with same-length spaces so the forward search can't match a token's raw inside a
+  // definition's destination/title. Handles titles on the same line and titles that begin
+  // on the following line(s), incl. multiline quoted titles. Positions are preserved.
+  function maskLinkDefinitions(text, links) {
+    if (!links) return text;
+    const labels = new Set(Object.keys(links).map((l) => l.toLowerCase()));
+    if (!labels.size) return text;
+    const lines = text.split("\n");
+    const defOpen = /^ {0,3}\[([^\]]+)\]:[ \t]*(.*)$/;
+    const lineTitle = /^[ \t]*(["'(])/;
+    const blank = (s) => " ".repeat(s.length);
+    let state = "scan"; // scan | inTitle | maybeTitle
+    let closing = null;
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (state === "inTitle") {
+        const hit = line.indexOf(closing) >= 0;
+        lines[i] = blank(line);
+        if (hit) state = "scan";
+        continue;
+      }
+      if (state === "maybeTitle") {
+        const t = lineTitle.exec(line);
+        state = "scan";
+        if (t) {
+          const delim = t[1] === "(" ? ")" : t[1];
+          lines[i] = blank(line);
+          if (line.slice(t.index + t[0].length).indexOf(delim) < 0) { state = "inTitle"; closing = delim; }
+          continue;
+        }
+        // no title after all — fall through and scan this line normally
+      }
+      const m = defOpen.exec(line);
+      if (!m || !labels.has(m[1].trim().toLowerCase())) continue;
+      lines[i] = blank(line);
+      const tail = m[2];
+      const opener = /(^|\s)(["'(])/.exec(tail);
+      if (opener) {
+        const delim = opener[2] === "(" ? ")" : opener[2];
+        if (tail.slice(opener.index + opener[0].length).indexOf(delim) < 0) { state = "inTitle"; closing = delim; }
+      } else if (tail.trim().length > 0) {
+        state = "maybeTitle"; // destination present; an optional title may start next line
+      }
+    }
+    return lines.join("\n");
+  }
+
   // Walk the SAME marked token stream used for rendering and record, in render order,
   // the source char offset of every task checkbox's "[ ]"/"[x]". Only top-level list
   // items get a real offset — nested-list and blockquote items have their source
@@ -403,33 +466,6 @@
     // with same-length spaces, so the forward search below can't match a token's raw text
     // that happens to also appear inside a definition's destination/title. Positions are
     // preserved, so offsets remain valid against the original string.
-    const maskLinkDefinitions = (text, links) => {
-      if (!links) return text;
-      const labels = new Set(Object.keys(links).map((l) => l.toLowerCase()));
-      if (!labels.size) return text;
-      const lines = text.split("\n");
-      const defOpen = /^ {0,3}\[([^\]]+)\]:\s*(.*)$/;
-      let closing = null; // delimiter that ends a title continuing across lines
-      for (let i = 0; i < lines.length; i++) {
-        const line = lines[i];
-        if (closing !== null) {
-          const hit = line.indexOf(closing) >= 0;
-          lines[i] = " ".repeat(line.length);
-          if (hit) closing = null;
-          continue;
-        }
-        const m = defOpen.exec(line);
-        if (!m || !labels.has(m[1].trim().toLowerCase())) continue;
-        lines[i] = " ".repeat(line.length);
-        const tail = m[2];
-        const opener = /(^|\s)(["'(])/.exec(tail); // start of an optional title
-        if (opener) {
-          const delim = opener[2] === "(" ? ")" : opener[2];
-          if (tail.slice(opener.index + opener[0].length).indexOf(delim) < 0) closing = delim;
-        }
-      }
-      return lines.join("\n");
-    };
     const searchSpace = maskLinkDefinitions(lf, tokens.links);
 
     // Nested-list / blockquote checkboxes: count them (so indices stay aligned with the
@@ -497,11 +533,20 @@
       cb.disabled = false;
       cb.style.cursor = "pointer";
       cb.title = "";
+      const offset = entry.offset;
       cb.addEventListener("change", () => {
+        // Send the hash of the exact source we mapped against; main.m writes only if the
+        // file still matches. Then mirror the toggle locally so the next click's hash
+        // matches the file we just wrote (no spurious reload between consecutive toggles).
         window.webkit.messageHandlers.checkboxToggle.postMessage({
-          offset: entry.offset,
-          checked: cb.checked
+          offset: offset,
+          checked: cb.checked,
+          hash: hashSource(sourceMarkdown),
+          length: sourceMarkdown.length
         });
+        if (sourceMarkdown.length >= offset + 3) {
+          sourceMarkdown = sourceMarkdown.slice(0, offset) + (cb.checked ? "[x]" : "[ ]") + sourceMarkdown.slice(offset + 3);
+        }
       });
     });
   }
@@ -695,6 +740,7 @@
 
     applyBaseUrl(baseUrl);
     renderedDocumentTitle = `QuickMD — ${filename}`;
+    sourceMarkdown = markdown;
     taskCheckboxOffsets = computeTaskCheckboxOffsets(markdown);
 
     try {
