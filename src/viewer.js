@@ -384,50 +384,53 @@
 
   // Blank out link reference definition blocks (which marked drops from the token list)
   // with same-length spaces so the forward search can't match a token's raw inside a
-  // definition's destination/title. Handles titles on the same line and titles that begin
-  // on the following line(s), incl. multiline quoted titles. Positions are preserved.
+  // definition's destination/title. This is a full CommonMark link-definition consumer:
+  // it handles destinations and titles that sit on the same line or wrap onto following
+  // lines, `<...>` destinations, and `"..."` / `'...'` / `(...)` titles incl. multiline.
+  // Newlines are preserved so character positions stay aligned with the original.
   function maskLinkDefinitions(text, links) {
     if (!links) return text;
     const labels = new Set(Object.keys(links).map((l) => l.toLowerCase()));
     if (!labels.size) return text;
-    const lines = text.split("\n");
-    const defOpen = /^ {0,3}\[([^\]]+)\]:[ \t]*(.*)$/;
-    const lineTitle = /^[ \t]*(["'(])/;
-    const blank = (s) => " ".repeat(s.length);
-    let state = "scan"; // scan | inTitle | maybeTitle
-    let closing = null;
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
-      if (state === "inTitle") {
-        const hit = line.indexOf(closing) >= 0;
-        lines[i] = blank(line);
-        if (hit) state = "scan";
-        continue;
-      }
-      if (state === "maybeTitle") {
-        const t = lineTitle.exec(line);
-        state = "scan";
-        if (t) {
-          const delim = t[1] === "(" ? ")" : t[1];
-          lines[i] = blank(line);
-          if (line.slice(t.index + t[0].length).indexOf(delim) < 0) { state = "inTitle"; closing = delim; }
-          continue;
+    const chars = text.split("");
+    const n = text.length;
+    const isWs = (c) => c === " " || c === "\t";
+    const skipWs = (p) => { while (p < n && isWs(text[p])) p++; return p; };
+    const blank = (a, b) => { for (let p = a; p < b && p < n; p++) if (text[p] !== "\n") chars[p] = " "; };
+
+    let i = 0;
+    while (i < n) {
+      const lineStart = i;
+      let j = i, spaces = 0;
+      while (j < n && text[j] === " " && spaces < 3) { j++; spaces++; } // up to 3 leading spaces
+      let consumedTo = -1;
+      if (text[j] === "[") {
+        const close = text.indexOf("]:", j + 1);
+        const nl = text.indexOf("\n", j + 1);
+        if (close > j && (nl < 0 || close < nl)) {
+          const label = text.slice(j + 1, close).trim().toLowerCase();
+          if (label && labels.has(label)) {
+            let k = skipWs(close + 2);
+            if (text[k] === "\n") k = skipWs(k + 1); // destination may start on the next line
+            if (text[k] === "<") { const e = text.indexOf(">", k + 1); k = e < 0 ? n : e + 1; }
+            else { while (k < n && !/\s/.test(text[k])) k++; }
+            consumedTo = k;
+            let m = skipWs(k), nlBefore = false;
+            if (text[m] === "\n") { nlBefore = true; m = skipWs(m + 1); } // title may start next line
+            const t = text[m];
+            if (t === '"' || t === "'" || t === "(") {
+              const closer = t === "(" ? ")" : t;
+              const e = text.indexOf(closer, m + 1);
+              if (e >= 0) consumedTo = e + 1; // title (possibly multiline) is part of the def
+            } else if (nlBefore) { /* newline then no title: def ends at the destination */ }
+          }
         }
-        // no title after all — fall through and scan this line normally
       }
-      const m = defOpen.exec(line);
-      if (!m || !labels.has(m[1].trim().toLowerCase())) continue;
-      lines[i] = blank(line);
-      const tail = m[2];
-      const opener = /(^|\s)(["'(])/.exec(tail);
-      if (opener) {
-        const delim = opener[2] === "(" ? ")" : opener[2];
-        if (tail.slice(opener.index + opener[0].length).indexOf(delim) < 0) { state = "inTitle"; closing = delim; }
-      } else if (tail.trim().length > 0) {
-        state = "maybeTitle"; // destination present; an optional title may start next line
-      }
+      if (consumedTo >= 0) { blank(lineStart, consumedTo); i = consumedTo; }
+      while (i < n && text[i] !== "\n") i++; // advance to next line start
+      if (i < n) i++;
     }
-    return lines.join("\n");
+    return chars.join("");
   }
 
   // Walk the SAME marked token stream used for rendering and record, in render order,
