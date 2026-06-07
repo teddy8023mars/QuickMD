@@ -399,9 +399,27 @@
     const blank = (a, b) => { for (let p = a; p < b && p < n; p++) if (text[p] !== "\n") chars[p] = " "; };
 
     let i = 0;
+    let fence = null; // { char, len } while inside a ``` / ~~~ fenced code block
     while (i < n) {
       const lineStart = i;
-      let j = i, spaces = 0;
+      let lineEnd = text.indexOf("\n", i);
+      if (lineEnd < 0) lineEnd = n;
+      // Track fenced code blocks: their contents are real tokens, never link definitions,
+      // so they must not be blanked even if a line looks like `[ref]: ...`.
+      let s = lineStart, fsp = 0;
+      while (s < lineEnd && text[s] === " " && fsp < 3) { s++; fsp++; }
+      const fch = text[s];
+      let runLen = 0;
+      if (fch === "`" || fch === "~") { let p = s; while (p < lineEnd && text[p] === fch) { runLen++; p++; } }
+      const isFence = runLen >= 3;
+      if (fence) {
+        if (isFence && fch === fence.char && runLen >= fence.len) fence = null; // closing fence
+        i = lineEnd + 1;
+        continue;
+      }
+      if (isFence) { fence = { char: fch, len: runLen }; i = lineEnd + 1; continue; }
+
+      let j = lineStart, spaces = 0;
       while (j < n && text[j] === " " && spaces < 3) { j++; spaces++; } // up to 3 leading spaces
       let consumedTo = -1;
       if (text[j] === "[") {

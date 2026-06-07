@@ -3,7 +3,8 @@
 // untagged. enableTaskCheckboxes selects by that tag, so a raw input — even one written as
 // the first element of an <li> — can no longer be miscounted as a task and disable the real
 // task checkboxes. This mirrors configureMarked()'s override; change both together.
-const marked = require("/Users/teddy/Desktop/QuickMD/QuickMDPreview/vendor/marked.min.js");
+const path = require("node:path");
+const marked = require(path.resolve(__dirname, "..", "QuickMDPreview", "vendor", "marked.min.js"));
 
 marked.setOptions({ gfm: true, breaks: false, pedantic: false });
 marked.use({

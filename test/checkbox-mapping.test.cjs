@@ -40,9 +40,24 @@ function computeTaskCheckboxOffsets(markdown) {
     const skipWs = (p) => { while (p < n && isWs(text[p])) p++; return p; };
     const blank = (a, b) => { for (let p = a; p < b && p < n; p++) if (text[p] !== "\n") chars[p] = " "; };
     let i = 0;
+    let fence = null;
     while (i < n) {
       const lineStart = i;
-      let j = i, spaces = 0;
+      let lineEnd = text.indexOf("\n", i);
+      if (lineEnd < 0) lineEnd = n;
+      let s = lineStart, fsp = 0;
+      while (s < lineEnd && text[s] === " " && fsp < 3) { s++; fsp++; }
+      const fch = text[s];
+      let runLen = 0;
+      if (fch === "`" || fch === "~") { let p = s; while (p < lineEnd && text[p] === fch) { runLen++; p++; } }
+      const isFence = runLen >= 3;
+      if (fence) {
+        if (isFence && fch === fence.char && runLen >= fence.len) fence = null;
+        i = lineEnd + 1; continue;
+      }
+      if (isFence) { fence = { char: fch, len: runLen }; i = lineEnd + 1; continue; }
+
+      let j = lineStart, spaces = 0;
       while (j < n && text[j] === " " && spaces < 3) { j++; spaces++; }
       let consumedTo = -1;
       if (text[j] === "[") {
@@ -169,6 +184,9 @@ check("link-def-angle-dest-collision", '[r]: <https://e> "* [ ] task"\n\n* [ ] t
 check("link-def-paren-title-collision", '[r]: https://e (* [ ] task)\n\n* [ ] task\n', { minEditable: 1, editableAtLastMarker: true });
 // Escaped delimiter inside the title must not be treated as the title's end.
 check("link-def-escaped-title-collision", '[r]: https://e "a \\" b\n* [ ] task"\n\n* [ ] task\n', { minEditable: 1, editableAtLastMarker: true });
+// A code fence containing a def-look-alike line for a label that IS defined elsewhere must
+// not be blanked, or the code token's raw goes unfound and later offsets drift.
+check("def-lookalike-inside-fence", '[ref]: https://e\n\n```\n[ref]: x\n- [ ] fake\n```\n\n- [ ] real\n', { minEditable: 1, editableAtLastMarker: true });
 
 if (!ok) process.exit(1);
 console.log("PASS: offsets align and hit real markers across LF/CRLF/link-def cases; nested/blockquote display-only");
