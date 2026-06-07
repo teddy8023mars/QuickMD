@@ -58,7 +58,7 @@ static NSError *QMDMakeError(NSInteger code, NSString *description) {
 @property(nonatomic, assign) BOOL hasPendingScrollRestore;
 @property(nonatomic, assign) BOOL hasAutoResized;
 @property(nonatomic, assign) BOOL pendingTOCVisible;
-@property(nonatomic, copy) NSString *expectedSelfWriteContent;
+@property(nonatomic, copy) NSString *displayedSource;
 
 - (BOOL)openMarkdownFileURL:(NSURL *)fileURL error:(NSError **)error;
 - (void)reloadPreview:(id)sender;
@@ -221,7 +221,12 @@ static NSError *QMDMakeError(NSInteger code, NSString *description) {
     self.previewFileURL = previewURL;
     self.previewReady = NO;
     self.lastExportedPDFURL = nil;
-    self.expectedSelfWriteContent = nil;
+    // Record the source the preview now displays. The file watcher reloads only when the file
+    // on disk differs from this, so our own checkbox writes (mirrored into this snapshot)
+    // never trigger a reload/flicker.
+    self.displayedSource = [NSString stringWithContentsOfURL:standardURL
+                                                    encoding:NSUTF8StringEncoding
+                                                       error:nil];
 
     self.window.title = [NSString stringWithFormat:@"QuickMD — %@", standardURL.lastPathComponent];
     self.window.representedURL = standardURL;
@@ -369,17 +374,16 @@ static void QMDFSEventCallback(ConstFSEventStreamRef streamRef,
     for (NSUInteger i = 0; i < numEvents; i++) {
         NSString *changedName = paths[i].lastPathComponent;
         if ([changedName isEqualToString:watchedName]) {
-            if (controller.expectedSelfWriteContent) {
-                NSString *current = [NSString stringWithContentsOfURL:controller.sourceFileURL
-                                                            encoding:NSUTF8StringEncoding
-                                                               error:nil];
-                NSString *expected = controller.expectedSelfWriteContent;
-                // Consume the marker on any matched event so a stale expectation can't later
-                // suppress a genuine external change that happens to equal it.
-                controller.expectedSelfWriteContent = nil;
-                if (current && [current isEqualToString:expected]) {
-                    return; // our own write; nothing to reload
-                }
+            // Reload only when the file on disk differs from what the preview currently
+            // shows. Our own checkbox writes are mirrored into displayedSource, so they (and
+            // any duplicate events from the atomic save) compare equal and are skipped — no
+            // flicker. A genuine external edit differs and reloads.
+            NSString *current = [NSString stringWithContentsOfURL:controller.sourceFileURL
+                                                         encoding:NSUTF8StringEncoding
+                                                            error:nil];
+            if (current && controller.displayedSource &&
+                [current isEqualToString:controller.displayedSource]) {
+                return; // nothing new to display
             }
             [controller reloadPreview:nil];
             return;
@@ -536,17 +540,18 @@ static void QMDFSEventCallback(ConstFSEventStreamRef streamRef,
     NSMutableString *mutableContent = [content mutableCopy];
     [mutableContent replaceCharactersInRange:boxRange withString:replacement];
 
-    // Record what we are about to write so the FSEvent callback can ignore our own change.
-    self.expectedSelfWriteContent = mutableContent;
-
     NSError *writeError = nil;
     if (![mutableContent writeToURL:self.sourceFileURL
                          atomically:YES
                            encoding:NSUTF8StringEncoding
                               error:&writeError]) {
-        self.expectedSelfWriteContent = nil; // write failed; let future events reload normally
-        return;
+        return; // write failed; displayedSource unchanged, future events reload normally
     }
+
+    // The preview already reflects the toggle (the DOM checkbox changed and offsets are
+    // unaffected), so advance the displayed-source snapshot to the written content. The
+    // resulting FSEvent(s) then compare equal and are skipped — no reload, no flicker.
+    self.displayedSource = mutableContent;
 }
 
 #pragma mark - WKNavigationDelegate
