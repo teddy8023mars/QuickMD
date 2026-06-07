@@ -382,12 +382,11 @@
     for (const image of images) { image.loading = "lazy"; image.decoding = "async"; }
   }
 
-  // Walk the SAME marked token stream used for rendering and record, in render order,
-  // the source char offset of every task checkbox's "[ ]"/"[x]". Only top-level list
-  // items get a real offset — nested-list and blockquote items have their source
-  // whitespace/prefixes stripped by marked, so their offsets can't be trusted; they are
-  // recorded as null (display-only). Every rendered checkbox gets exactly one entry, so
-  // entries stay index-aligned with the DOM checkboxes.
+  // Walk the SAME marked token stream used for rendering and record, in render order, the
+  // source char offset of every task checkbox's "[ ]"/"[x]". List checkboxes at any nesting
+  // depth get a real offset (the list's raw is verbatim and source order == render order);
+  // blockquote checkboxes, or any list we can't map 1:1, are recorded as null (display-only).
+  // Every rendered checkbox gets exactly one entry, so entries stay index-aligned with the DOM.
   function computeTaskCheckboxOffsets(markdown) {
     const out = [];
     if (!window.marked || typeof window.marked.lexer !== "function") return out;
@@ -475,19 +474,51 @@
       return pos;
     };
 
-    // Nested-list / blockquote checkboxes: count them (so indices stay aligned with the
-    // rendered DOM) but never emit an offset — their source is normalized by marked.
-    const countNonEditable = (toks) => {
+    // Count every task checkbox marked renders inside `toks` (list items at any depth,
+    // including those nested through blockquotes), matching the DOM's checkbox count.
+    const countTasks = (toks) => {
+      let c = 0;
       for (const token of toks) {
         if (token.type === "list") {
           for (const item of token.items) {
-            if (item.task) out.push({ offset: null });
-            if (item.tokens) countNonEditable(item.tokens);
+            if (item.task) c++;
+            if (item.tokens) c += countTasks(item.tokens);
           }
-        } else if (token.type === "blockquote") {
-          if (token.tokens) countNonEditable(token.tokens);
+        } else if (token.tokens) {
+          c += countTasks(token.tokens);
         }
       }
+      return c;
+    };
+
+    // Scan a verbatim source range for task-list markers at any indent, in source order
+    // (which equals the rendered DOM order). Returns the lf offset of each "[ ]"/"[x]".
+    // Fence-aware so checkbox-look-alikes inside fenced code in a list item are ignored.
+    const taskMarker = /^[ \t]*(?:[-*+]|\d+[.)])[ \t]+(\[[ xX]\])/;
+    const scanTaskMarkers = (from, to) => {
+      const found = [];
+      let i = from;
+      let fence = null; // { char, len } inside a ``` / ~~~ fence
+      while (i < to) {
+        let lineEnd = lf.indexOf("\n", i);
+        if (lineEnd < 0 || lineEnd > to) lineEnd = to;
+        let s = i, sp = 0;
+        while (s < lineEnd && lf[s] === " " && sp < 3) { s++; sp++; }
+        const fch = lf[s];
+        let runLen = 0;
+        if (fch === "`" || fch === "~") { let p = s; while (p < lineEnd && lf[p] === fch) { runLen++; p++; } }
+        const isFence = runLen >= 3;
+        if (fence) {
+          if (isFence && fch === fence.char && runLen >= fence.len) fence = null;
+          i = lineEnd + 1; continue;
+        }
+        if (isFence) { fence = { char: fch, len: runLen }; i = lineEnd + 1; continue; }
+        const line = lf.slice(i, lineEnd);
+        const m = taskMarker.exec(line);
+        if (m) found.push(i + m.index + m[0].length - m[1].length); // offset of the "["
+        i = lineEnd + 1;
+      }
+      return found;
     };
 
     let cursor = 0;
@@ -507,17 +538,21 @@
         }
       }
       if (token.type === "list") {
-        let itemBase = base; // list.items[].raw sum exactly to list.raw, so this is reliable
-        for (const item of token.items) {
-          if (item.task) {
-            const m = /\[[ xX]\]/.exec(item.raw);
-            out.push({ offset: m ? lfToOrig[itemBase + m.index] : null });
-          }
-          if (item.tokens) countNonEditable(item.tokens);
-          itemBase += item.raw.length;
+        // The whole list's raw sits verbatim at `base`, and task markers appear in source
+        // order == render order, so scanning yields offsets for every checkbox incl. nested.
+        const expected = countTasks([token]);
+        const markers = scanTaskMarkers(base, base + token.raw.length);
+        if (markers.length === expected) {
+          for (const off of markers) out.push({ offset: lfToOrig[off] });
+        } else {
+          // Couldn't map confidently (e.g. blockquoted tasks inside the list) — keep counts
+          // aligned with the DOM but make this list display-only.
+          for (let z = 0; z < expected; z++) out.push({ offset: null });
         }
       } else if (token.type === "blockquote") {
-        if (token.tokens) countNonEditable(token.tokens);
+        // Blockquote source is normalized by marked; count tasks but leave them display-only.
+        const expected = countTasks([token]);
+        for (let z = 0; z < expected; z++) out.push({ offset: null });
       }
       cursor = base + token.raw.length;
     }

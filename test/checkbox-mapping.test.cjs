@@ -81,17 +81,46 @@ function computeTaskCheckboxOffsets(markdown) {
     return pos;
   };
 
-  const countNonEditable = (toks) => {
+  const countTasks = (toks) => {
+    let c = 0;
     for (const token of toks) {
       if (token.type === "list") {
         for (const item of token.items) {
-          if (item.task) out.push({ offset: null });
-          if (item.tokens) countNonEditable(item.tokens);
+          if (item.task) c++;
+          if (item.tokens) c += countTasks(item.tokens);
         }
-      } else if (token.type === "blockquote") {
-        if (token.tokens) countNonEditable(token.tokens);
+      } else if (token.tokens) {
+        c += countTasks(token.tokens);
       }
     }
+    return c;
+  };
+
+  const taskMarker = /^[ \t]*(?:[-*+]|\d+[.)])[ \t]+(\[[ xX]\])/;
+  const scanTaskMarkers = (from, to) => {
+    const found = [];
+    let i = from;
+    let fence = null;
+    while (i < to) {
+      let lineEnd = lf.indexOf("\n", i);
+      if (lineEnd < 0 || lineEnd > to) lineEnd = to;
+      let s = i, sp = 0;
+      while (s < lineEnd && lf[s] === " " && sp < 3) { s++; sp++; }
+      const fch = lf[s];
+      let runLen = 0;
+      if (fch === "`" || fch === "~") { let p = s; while (p < lineEnd && lf[p] === fch) { runLen++; p++; } }
+      const isFence = runLen >= 3;
+      if (fence) {
+        if (isFence && fch === fence.char && runLen >= fence.len) fence = null;
+        i = lineEnd + 1; continue;
+      }
+      if (isFence) { fence = { char: fch, len: runLen }; i = lineEnd + 1; continue; }
+      const line = lf.slice(i, lineEnd);
+      const m = taskMarker.exec(line);
+      if (m) found.push(i + m.index + m[0].length - m[1].length);
+      i = lineEnd + 1;
+    }
+    return found;
   };
 
   let cursor = 0;
@@ -110,17 +139,16 @@ function computeTaskCheckboxOffsets(markdown) {
       }
     }
     if (token.type === "list") {
-      let itemBase = base;
-      for (const item of token.items) {
-        if (item.task) {
-          const m = /\[[ xX]\]/.exec(item.raw);
-          out.push({ offset: m ? lfToOrig[itemBase + m.index] : null });
-        }
-        if (item.tokens) countNonEditable(item.tokens);
-        itemBase += item.raw.length;
+      const expected = countTasks([token]);
+      const markers = scanTaskMarkers(base, base + token.raw.length);
+      if (markers.length === expected) {
+        for (const off of markers) out.push({ offset: lfToOrig[off] });
+      } else {
+        for (let z = 0; z < expected; z++) out.push({ offset: null });
       }
     } else if (token.type === "blockquote") {
-      if (token.tokens) countNonEditable(token.tokens);
+      const expected = countTasks([token]);
+      for (let z = 0; z < expected; z++) out.push({ offset: null });
     }
     cursor = base + token.raw.length;
   }
@@ -157,8 +185,9 @@ function check(label, source, opts = {}) {
 }
 
 // Shared fixture (nested + blockquote + fenced decoy), under LF and CRLF.
-check("LF", md.replace(/\r\n/g, "\n"), { minReadonly: 2, minRendered: 7 });
-check("CRLF", md.replace(/\r\n/g, "\n").replace(/\n/g, "\r\n"), { minReadonly: 2, minRendered: 7 });
+// 7 checkboxes: 5 top-level + 1 nested (now editable) + 1 blockquote (display-only).
+check("LF", md.replace(/\r\n/g, "\n"), { minReadonly: 1, minEditable: 6, minRendered: 7 });
+check("CRLF", md.replace(/\r\n/g, "\n").replace(/\n/g, "\r\n"), { minReadonly: 1, minEditable: 6, minRendered: 7 });
 
 // Link reference definitions emit no token — offsets must still land on real markers.
 check("link-defs", '[ref]: https://example.com "x"\n[a]: https://a.example\n\n- [ ] first\n- [ ] second\n', { minEditable: 2 });
