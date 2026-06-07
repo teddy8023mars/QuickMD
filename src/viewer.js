@@ -524,8 +524,25 @@
     return out;
   }
 
+  // A GFM task-list checkbox is rendered by marked as the first element of an <li> (tight
+  // lists) or of the <li>'s leading <p> (loose lists). Any other input[type=checkbox] is
+  // raw HTML from the document and must be ignored so it doesn't shift the index mapping.
+  function isTaskCheckbox(cb) {
+    const parent = cb.parentElement;
+    if (!parent || cb !== parent.firstElementChild) return false;
+    if (parent.tagName === "LI") return true;
+    if (parent.tagName === "P") {
+      const li = parent.parentElement;
+      return !!li && li.tagName === "LI" && li.firstElementChild === parent;
+    }
+    return false;
+  }
+
   function enableTaskCheckboxes(root) {
-    const checkboxes = root.querySelectorAll('input[type="checkbox"]');
+    const checkboxes = Array.prototype.filter.call(
+      root.querySelectorAll('input[type="checkbox"]'),
+      isTaskCheckbox
+    );
     // Fail safe: if our offset map doesn't line up 1:1 with what marked rendered, make
     // every checkbox display-only rather than risk writing to the wrong source line.
     const aligned = checkboxes.length === taskCheckboxOffsets.length;
