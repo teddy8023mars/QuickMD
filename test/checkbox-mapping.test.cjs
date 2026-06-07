@@ -96,6 +96,19 @@ function computeTaskCheckboxOffsets(markdown) {
     return c;
   };
 
+  const countListTasks = (toks) => {
+    let c = 0;
+    for (const token of toks) {
+      if (token.type === "list") {
+        for (const item of token.items) {
+          if (item.task) c++;
+          if (item.tokens) c += countListTasks(item.tokens);
+        }
+      }
+    }
+    return c;
+  };
+
   const taskMarker = /^[ \t]*(?:[-*+]|\d+[.)])[ \t]+(\[[ xX]\])/;
   const scanTaskMarkers = (from, to) => {
     const found = [];
@@ -139,12 +152,13 @@ function computeTaskCheckboxOffsets(markdown) {
       }
     }
     if (token.type === "list") {
-      const expected = countTasks([token]);
+      const total = countTasks([token]);
+      const listTasks = countListTasks([token]);
       const markers = scanTaskMarkers(base, base + token.raw.length);
-      if (markers.length === expected) {
+      if (total === listTasks && markers.length === listTasks) {
         for (const off of markers) out.push({ offset: lfToOrig[off] });
       } else {
-        for (let z = 0; z < expected; z++) out.push({ offset: null });
+        for (let z = 0; z < total; z++) out.push({ offset: null });
       }
     } else if (token.type === "blockquote") {
       const expected = countTasks([token]);
@@ -174,6 +188,7 @@ function check(label, source, opts = {}) {
   if (opts.minReadonly != null && readonly < opts.minReadonly) fail(`[${label}] expected >=${opts.minReadonly} display-only, got ${readonly}`);
   if (opts.minRendered != null && rendered < opts.minRendered) fail(`[${label}] expected >=${opts.minRendered} checkboxes, got ${rendered}`);
   if (opts.minEditable != null && editable.length < opts.minEditable) fail(`[${label}] expected >=${opts.minEditable} editable, got ${editable.length}`);
+  if (opts.maxEditable != null && editable.length > opts.maxEditable) fail(`[${label}] expected <=${opts.maxEditable} editable, got ${editable.length}`);
   // For collision fixtures the decoy marker sits earlier (inside a link def); the real,
   // rendered task is the LAST marker in the source. The editable offset must hit that one.
   if (opts.editableAtLastMarker) {
@@ -210,6 +225,14 @@ check("link-def-escaped-title-collision", '[r]: https://e "a \\" b\n* [ ] task"\
 check("def-lookalike-inside-fence", '[ref]: https://e\n\n```\n[ref]: x\n- [ ] fake\n```\n\n- [ ] real\n', { minEditable: 1, editableAtLastMarker: true });
 // Label with collapsed internal whitespace must normalize to match marked's key and be masked.
 check("def-collapsed-label-collision", '[a  b]: https://e "x\n- [ ] task"\n\n- [ ] task\n', { minEditable: 1, editableAtLastMarker: true });
+
+// Plain nested task lists are editable (no blockquote, no code decoy).
+check("plain-nested", "- [ ] a\n  - [ ] b\n    - [x] c\n- [ ] d\n", { minEditable: 4, maxEditable: 4 });
+// A blockquoted task inside a list can't be located by the scanner, so the WHOLE list is
+// display-only (never editable with a wrong offset). Both checkboxes must be display-only.
+check("blockquote-task-in-list", "- [ ] parent\n  > - [ ] quoted\n", { minRendered: 2, minReadonly: 2, maxEditable: 0 });
+// An indented-code task-look-alike inside a list makes the scan over-count → display-only.
+check("indented-code-in-list", "- [ ] real\n\n        - [ ] fake\n", { maxEditable: 0 });
 
 if (!ok) process.exit(1);
 console.log("PASS: offsets align and hit real markers across LF/CRLF/link-def cases; nested/blockquote display-only");

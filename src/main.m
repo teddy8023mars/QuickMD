@@ -208,6 +208,16 @@ static NSError *QMDMakeError(NSInteger code, NSString *description) {
 
 - (BOOL)openMarkdownFileURL:(NSURL *)fileURL error:(NSError **)error {
     NSURL *standardURL = fileURL.fileURL ? fileURL.URLByStandardizingPath : [NSURL fileURLWithPath:fileURL.path];
+
+    // Snapshot the source the preview will display BEFORE the renderer reads the file. The
+    // file watcher reloads only when the file on disk differs from this snapshot, so our own
+    // checkbox writes (mirrored into it) never trigger a reload/flicker. Reading before the
+    // renderer means a concurrent external edit makes the snapshot OLDER than what was
+    // rendered, which errs toward one harmless extra reload rather than a stale preview.
+    NSString *snapshot = [NSString stringWithContentsOfURL:standardURL
+                                                  encoding:NSUTF8StringEncoding
+                                                     error:nil];
+
     NSURL *previewURL = [self previewHTMLURLForFileURL:standardURL error:error];
 
     if (!previewURL) {
@@ -221,12 +231,7 @@ static NSError *QMDMakeError(NSInteger code, NSString *description) {
     self.previewFileURL = previewURL;
     self.previewReady = NO;
     self.lastExportedPDFURL = nil;
-    // Record the source the preview now displays. The file watcher reloads only when the file
-    // on disk differs from this, so our own checkbox writes (mirrored into this snapshot)
-    // never trigger a reload/flicker.
-    self.displayedSource = [NSString stringWithContentsOfURL:standardURL
-                                                    encoding:NSUTF8StringEncoding
-                                                       error:nil];
+    self.displayedSource = snapshot;
 
     self.window.title = [NSString stringWithFormat:@"QuickMD — %@", standardURL.lastPathComponent];
     self.window.representedURL = standardURL;

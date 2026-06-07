@@ -475,7 +475,7 @@
     };
 
     // Count every task checkbox marked renders inside `toks` (list items at any depth,
-    // including those nested through blockquotes), matching the DOM's checkbox count.
+    // including those reached through blockquotes), matching the DOM's checkbox count.
     const countTasks = (toks) => {
       let c = 0;
       for (const token of toks) {
@@ -486,6 +486,22 @@
           }
         } else if (token.tokens) {
           c += countTasks(token.tokens);
+        }
+      }
+      return c;
+    };
+
+    // Count only task items reachable through plain list nesting — i.e. the ones the
+    // line scanner can locate. Tasks inside blockquotes are excluded (the scanner skips
+    // their ">" lines); if a list contains any, it can't be mapped 1:1 and stays read-only.
+    const countListTasks = (toks) => {
+      let c = 0;
+      for (const token of toks) {
+        if (token.type === "list") {
+          for (const item of token.items) {
+            if (item.task) c++;
+            if (item.tokens) c += countListTasks(item.tokens);
+          }
         }
       }
       return c;
@@ -540,14 +556,15 @@
       if (token.type === "list") {
         // The whole list's raw sits verbatim at `base`, and task markers appear in source
         // order == render order, so scanning yields offsets for every checkbox incl. nested.
-        const expected = countTasks([token]);
+        const total = countTasks([token]); // every checkbox the DOM renders in this list
+        const listTasks = countListTasks([token]); // the subset the scanner can locate
         const markers = scanTaskMarkers(base, base + token.raw.length);
-        if (markers.length === expected) {
+        // Editable only when there are no blockquoted tasks (total === listTasks) AND the
+        // scan matched exactly that many markers (no indented-code look-alikes or misses).
+        if (total === listTasks && markers.length === listTasks) {
           for (const off of markers) out.push({ offset: lfToOrig[off] });
         } else {
-          // Couldn't map confidently (e.g. blockquoted tasks inside the list) — keep counts
-          // aligned with the DOM but make this list display-only.
-          for (let z = 0; z < expected; z++) out.push({ offset: null });
+          for (let z = 0; z < total; z++) out.push({ offset: null });
         }
       } else if (token.type === "blockquote") {
         // Blockquote source is normalized by marked; count tasks but leave them display-only.
