@@ -18,6 +18,24 @@ static BOOL QMDURLLooksLikeMarkdown(NSURL *url) {
     return [QMDMarkdownExtensions() containsObject:url.pathExtension.lowercaseString];
 }
 
+// FNV-1a over UTF-16 code units. Mirrors hashSource() in viewer.js byte-for-byte so the
+// native side can confirm the on-disk file is exactly what the preview was rendered from.
+static uint32_t QMDHashUTF16(NSString *string) {
+    NSUInteger length = string.length;
+    uint32_t hash = 0x811c9dc5u;
+    if (length == 0) return hash;
+    unichar *buffer = (unichar *)malloc(length * sizeof(unichar));
+    if (!buffer) return hash;
+    [string getCharacters:buffer range:NSMakeRange(0, length)];
+    for (NSUInteger i = 0; i < length; i++) {
+        unichar c = buffer[i];
+        hash = (hash ^ (c & 0xff)) * 0x01000193u;
+        hash = (hash ^ ((c >> 8) & 0xff)) * 0x01000193u;
+    }
+    free(buffer);
+    return hash;
+}
+
 static NSError *QMDMakeError(NSInteger code, NSString *description) {
     return [NSError errorWithDomain:QMDErrorDomain
                                code:code
@@ -203,6 +221,7 @@ static NSError *QMDMakeError(NSInteger code, NSString *description) {
     self.previewFileURL = previewURL;
     self.previewReady = NO;
     self.lastExportedPDFURL = nil;
+    self.expectedSelfWriteContent = nil;
 
     self.window.title = [NSString stringWithFormat:@"QuickMD — %@", standardURL.lastPathComponent];
     self.window.representedURL = standardURL;
@@ -354,9 +373,12 @@ static void QMDFSEventCallback(ConstFSEventStreamRef streamRef,
                 NSString *current = [NSString stringWithContentsOfURL:controller.sourceFileURL
                                                             encoding:NSUTF8StringEncoding
                                                                error:nil];
-                if (current && [current isEqualToString:controller.expectedSelfWriteContent]) {
-                    controller.expectedSelfWriteContent = nil; // our own write; nothing to reload
-                    return;
+                NSString *expected = controller.expectedSelfWriteContent;
+                // Consume the marker on any matched event so a stale expectation can't later
+                // suppress a genuine external change that happens to equal it.
+                controller.expectedSelfWriteContent = nil;
+                if (current && [current isEqualToString:expected]) {
+                    return; // our own write; nothing to reload
                 }
             }
             [controller reloadPreview:nil];
@@ -460,40 +482,22 @@ static void QMDFSEventCallback(ConstFSEventStreamRef streamRef,
 
 #pragma mark - WKScriptMessageHandler
 
-// Returns the source NSRange of each editable task checkbox marker ("[ ]" / "[x]"),
-// in render order, skipping fenced code blocks. Matches -, *, +, and ordered list markers,
-// mirroring what marked.js renders as an interactive checkbox.
-- (NSArray<NSValue *> *)taskCheckboxRangesInString:(NSString *)content {
-    NSMutableArray<NSValue *> *ranges = [NSMutableArray array];
-    NSRegularExpression *lineRegex =
-        [NSRegularExpression regularExpressionWithPattern:@"^[ \\t]*(?:[-*+]|\\d+[.)])\\s+(\\[[ xX]\\])"
-                                                  options:0
-                                                    error:nil];
-    __block BOOL inFence = NO;
-    [content enumerateSubstringsInRange:NSMakeRange(0, content.length)
-                               options:NSStringEnumerationByLines
-                            usingBlock:^(NSString *line, NSRange lineRange, NSRange enclosingRange, BOOL *stop) {
-        NSString *trimmed = [line stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
-        if ([trimmed hasPrefix:@"```"] || [trimmed hasPrefix:@"~~~"]) { inFence = !inFence; return; }
-        if (inFence) return;
-        NSTextCheckingResult *m = [lineRegex firstMatchInString:line
-                                                        options:0
-                                                          range:NSMakeRange(0, line.length)];
-        if (!m) return;
-        NSRange boxInLine = [m rangeAtIndex:1]; // the "[ ]" / "[x]"
-        NSRange boxInContent = NSMakeRange(lineRange.location + boxInLine.location, boxInLine.length);
-        [ranges addObject:[NSValue valueWithRange:boxInContent]];
-    }];
-    return ranges;
-}
-
 - (void)userContentController:(WKUserContentController *)userContentController
       didReceiveScriptMessage:(WKScriptMessage *)message {
     if (![message.name isEqualToString:@"checkboxToggle"]) return;
     if (![message.body isKindOfClass:[NSDictionary class]]) return;
 
     NSDictionary *body = (NSDictionary *)message.body;
-    NSInteger checkboxIndex = [body[@"index"] integerValue];
+    // The viewer computes the exact source offset of the checkbox marker from marked's own
+    // token stream, so the native side never re-parses the Markdown. It also sends a hash of
+    // the exact source it mapped against; we only write when the file still matches that hash,
+    // and only when the offset still points at a literal "[ ]"/"[x]".
+    NSNumber *offsetNumber = body[@"offset"];
+    NSNumber *hashNumber = body[@"hash"];
+    NSNumber *lengthNumber = body[@"length"];
+    if (![offsetNumber isKindOfClass:[NSNumber class]]) return;
+    if (![hashNumber isKindOfClass:[NSNumber class]] || ![lengthNumber isKindOfClass:[NSNumber class]]) return;
+    NSInteger offset = offsetNumber.integerValue;
     BOOL checked = [body[@"checked"] boolValue];
 
     if (!self.sourceFileURL) return;
@@ -504,23 +508,33 @@ static void QMDFSEventCallback(ConstFSEventStreamRef streamRef,
                                                    error:&readError];
     if (readError || !content) return;
 
-    NSArray<NSValue *> *boxes = [self taskCheckboxRangesInString:content];
-    if (checkboxIndex < 0 || checkboxIndex >= (NSInteger)boxes.count) return;
-
-    NSRange boxRange = [boxes[checkboxIndex] rangeValue];
-    NSString *replacement = checked ? @"[x]" : @"[ ]";
-
-    NSMutableString *mutableContent = [content mutableCopy];
-    [mutableContent replaceCharactersInRange:boxRange withString:replacement];
-
-    // Stale-write guard: if the file changed on disk since we rendered, reload instead of clobbering.
-    NSString *latest = [NSString stringWithContentsOfURL:self.sourceFileURL
-                                                encoding:NSUTF8StringEncoding
-                                                   error:nil];
-    if (latest && ![latest isEqualToString:content]) {
+    // The posted offset is only valid against the exact bytes the viewer rendered. If the
+    // file no longer matches that content (an external edit whose reload hasn't landed yet),
+    // the DOM is stale — reload instead of applying a stale offset to different bytes.
+    if ((NSInteger)content.length != lengthNumber.integerValue ||
+        QMDHashUTF16(content) != (uint32_t)hashNumber.unsignedIntValue) {
         [self reloadPreview:nil];
         return;
     }
+
+    if (offset < 0 || offset + 3 > (NSInteger)content.length) return;
+    NSRange boxRange = NSMakeRange((NSUInteger)offset, 3);
+
+    // Safety check: the offset must still land on a checkbox marker. If the source drifted
+    // (e.g. edited since render), this fails and we abort rather than corrupt an unrelated line.
+    NSString *marker = [content substringWithRange:boxRange];
+    static NSRegularExpression *markerRegex;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        markerRegex = [NSRegularExpression regularExpressionWithPattern:@"^\\[[ xX]\\]$" options:0 error:nil];
+    });
+    if ([markerRegex numberOfMatchesInString:marker options:0 range:NSMakeRange(0, marker.length)] == 0) {
+        return;
+    }
+
+    NSString *replacement = checked ? @"[x]" : @"[ ]";
+    NSMutableString *mutableContent = [content mutableCopy];
+    [mutableContent replaceCharactersInRange:boxRange withString:replacement];
 
     // Record what we are about to write so the FSEvent callback can ignore our own change.
     self.expectedSelfWriteContent = mutableContent;

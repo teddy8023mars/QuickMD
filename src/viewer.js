@@ -15,6 +15,24 @@
   let renderedDocumentTitle = document.title;
   let mermaidRenderGeneration = 0;
   let tocVisible = false;
+  // One entry per checkbox marked renders, in render order. { offset } is the source
+  // char index of its "[ ]"/"[x]" when editable, or null when it can't be safely mapped.
+  let taskCheckboxOffsets = [];
+  // The exact markdown this preview was rendered from. Sent (as a hash) with every checkbox
+  // toggle so the native side only writes when the file still matches what we mapped offsets
+  // against. Kept in sync with our own toggles so consecutive clicks don't force reloads.
+  let sourceMarkdown = "";
+
+  // FNV-1a over UTF-16 code units; mirrored byte-for-byte by QMDHashUTF16 in main.m.
+  function hashSource(str) {
+    let h = 0x811c9dc5 >>> 0;
+    for (let i = 0; i < str.length; i++) {
+      const c = str.charCodeAt(i);
+      h = (Math.imul(h ^ (c & 0xff), 0x01000193)) >>> 0;
+      h = (Math.imul(h ^ ((c >> 8) & 0xff), 0x01000193)) >>> 0;
+    }
+    return h >>> 0;
+  }
 
   // ─── Theme Management ───────────────────────────────────────────────
 
@@ -364,16 +382,180 @@
     for (const image of images) { image.loading = "lazy"; image.decoding = "async"; }
   }
 
+  // Walk the SAME marked token stream used for rendering and record, in render order,
+  // the source char offset of every task checkbox's "[ ]"/"[x]". Only top-level list
+  // items get a real offset — nested-list and blockquote items have their source
+  // whitespace/prefixes stripped by marked, so their offsets can't be trusted; they are
+  // recorded as null (display-only). Every rendered checkbox gets exactly one entry, so
+  // entries stay index-aligned with the DOM checkboxes.
+  function computeTaskCheckboxOffsets(markdown) {
+    const out = [];
+    if (!window.marked || typeof window.marked.lexer !== "function") return out;
+
+    // marked normalizes token.raw line endings to "\n". Lex a normalized copy so raw
+    // lengths sum exactly to it, compute offsets in that space, then map each back to the
+    // original string's coordinates (which main.m reads verbatim, CRLF and all).
+    let lf = "";
+    const lfToOrig = []; // lfToOrig[i] = index in `markdown` of the i-th char of `lf`
+    for (let i = 0; i < markdown.length; i++) {
+      const ch = markdown[i];
+      if (ch === "\r") {
+        if (markdown[i + 1] === "\n") continue; // CRLF: drop the \r, keep the \n next loop
+        lfToOrig.push(i); lf += "\n"; continue; // lone CR -> \n
+      }
+      lfToOrig.push(i); lf += ch;
+    }
+    lfToOrig.push(markdown.length); // sentinel
+
+    let tokens;
+    try {
+      tokens = window.marked.lexer(lf);
+    } catch {
+      return out;
+    }
+
+    // Position each top-level token by CONSUMING the source rather than searching for it.
+    // marked drops only link reference definitions from the top-level stream (everything
+    // else, incl. blank lines, is a token), so between tokens we skip exactly those dropped
+    // definition blocks; every token's raw then sits at the cursor verbatim. A definition
+    // nested inside a list is part of that list's raw and is consumed wholesale, so it never
+    // needs separate handling. This avoids the ambiguity of substring search entirely.
+    const n = lf.length;
+    const isWs = (c) => c === " " || c === "\t";
+    const skipWs = (p) => { while (p < n && isWs(lf[p])) p++; return p; };
+    const normLabel = (l) => l.trim().replace(/\s+/g, " ").toLowerCase();
+    const labels = new Set(Object.keys(tokens.links || {}).map(normLabel));
+
+    // If a link reference definition for a known label starts at line position `pos`, return
+    // the index just past its content; otherwise -1. Handles same-line/next-line destinations
+    // and "..."/'...'/(...) titles incl. multiline and backslash-escaped delimiters.
+    const defEnd = (pos) => {
+      let j = pos, sp = 0;
+      while (j < n && lf[j] === " " && sp < 3) { j++; sp++; } // up to 3 leading spaces
+      if (lf[j] !== "[") return -1;
+      const close = lf.indexOf("]:", j + 1);
+      const nl = lf.indexOf("\n", j + 1);
+      if (close < 0 || (nl >= 0 && close > nl)) return -1; // label must be on one line
+      if (!labels.has(normLabel(lf.slice(j + 1, close)))) return -1;
+      let k = skipWs(close + 2);
+      if (lf[k] === "\n") k = skipWs(k + 1); // destination may start on the next line
+      if (lf[k] === "<") { const e = lf.indexOf(">", k + 1); k = e < 0 ? n : e + 1; }
+      else { while (k < n && !/\s/.test(lf[k])) k++; }
+      let end = k;
+      let m = skipWs(k), nlBefore = false;
+      if (lf[m] === "\n") { nlBefore = true; m = skipWs(m + 1); } // title may start next line
+      const t = lf[m];
+      if (t === '"' || t === "'" || t === "(") {
+        const closer = t === "(" ? ")" : t;
+        for (let p = m + 1; p < n; p++) {
+          if (lf[p] === "\\") { p++; continue; }
+          if (lf[p] === closer) { end = p + 1; break; }
+        }
+      } else if (nlBefore) { /* newline then no title: def ends at the destination */ }
+      return end;
+    };
+
+    // Skip consecutive dropped definition blocks (and their trailing blank lines) at `pos`.
+    const skipDroppedDefs = (pos) => {
+      for (;;) {
+        const end = defEnd(pos);
+        if (end < 0) break;
+        let p = end;
+        while (p < n && lf[p] !== "\n") p++; // to end of the definition's last line
+        if (p < n) p++;
+        for (;;) { // skip following blank lines
+          let q = p;
+          while (q < n && lf[q] !== "\n" && isWs(lf[q])) q++;
+          if (q < n && lf[q] === "\n") { p = q + 1; continue; }
+          if (q >= n) p = n;
+          break;
+        }
+        pos = p;
+      }
+      return pos;
+    };
+
+    // Nested-list / blockquote checkboxes: count them (so indices stay aligned with the
+    // rendered DOM) but never emit an offset — their source is normalized by marked.
+    const countNonEditable = (toks) => {
+      for (const token of toks) {
+        if (token.type === "list") {
+          for (const item of token.items) {
+            if (item.task) out.push({ offset: null });
+            if (item.tokens) countNonEditable(item.tokens);
+          }
+        } else if (token.type === "blockquote") {
+          if (token.tokens) countNonEditable(token.tokens);
+        }
+      }
+    };
+
+    let cursor = 0;
+    for (const token of tokens) {
+      cursor = skipDroppedDefs(cursor);
+      let base;
+      if (lf.startsWith(token.raw, cursor)) {
+        base = cursor;
+      } else {
+        // Defensive resync (should not happen): line-anchored forward search.
+        base = cursor;
+        for (let from = cursor; ; ) {
+          const idx = lf.indexOf(token.raw, from);
+          if (idx < 0) break;
+          if (idx === 0 || lf[idx - 1] === "\n") { base = idx; break; }
+          from = idx + 1;
+        }
+      }
+      if (token.type === "list") {
+        let itemBase = base; // list.items[].raw sum exactly to list.raw, so this is reliable
+        for (const item of token.items) {
+          if (item.task) {
+            const m = /\[[ xX]\]/.exec(item.raw);
+            out.push({ offset: m ? lfToOrig[itemBase + m.index] : null });
+          }
+          if (item.tokens) countNonEditable(item.tokens);
+          itemBase += item.raw.length;
+        }
+      } else if (token.type === "blockquote") {
+        if (token.tokens) countNonEditable(token.tokens);
+      }
+      cursor = base + token.raw.length;
+    }
+    return out;
+  }
+
   function enableTaskCheckboxes(root) {
-    const checkboxes = root.querySelectorAll('input[type="checkbox"]');
+    // Only inputs tagged by our marked renderer are GFM task-list checkboxes; raw HTML
+    // <input> in the document is left untouched so it can't shift the index mapping.
+    const checkboxes = root.querySelectorAll('input[type="checkbox"][data-qmd-task]');
+    // Fail safe: if our offset map doesn't line up 1:1 with what marked rendered, make
+    // every checkbox display-only rather than risk writing to the wrong source line.
+    const aligned = checkboxes.length === taskCheckboxOffsets.length;
     checkboxes.forEach((cb, index) => {
+      const entry = aligned ? taskCheckboxOffsets[index] : null;
+      if (!entry || entry.offset == null) {
+        cb.disabled = true;
+        cb.style.cursor = "default";
+        cb.title = "This checkbox is display-only (its source position can't be mapped safely).";
+        return;
+      }
       cb.disabled = false;
       cb.style.cursor = "pointer";
+      cb.title = "";
+      const offset = entry.offset;
       cb.addEventListener("change", () => {
+        // Send the hash of the exact source we mapped against; main.m writes only if the
+        // file still matches. Then mirror the toggle locally so the next click's hash
+        // matches the file we just wrote (no spurious reload between consecutive toggles).
         window.webkit.messageHandlers.checkboxToggle.postMessage({
-          index: index,
-          checked: cb.checked
+          offset: offset,
+          checked: cb.checked,
+          hash: hashSource(sourceMarkdown),
+          length: sourceMarkdown.length
         });
+        if (sourceMarkdown.length >= offset + 3) {
+          sourceMarkdown = sourceMarkdown.slice(0, offset) + (cb.checked ? "[x]" : "[ ]") + sourceMarkdown.slice(offset + 3);
+        }
       });
     });
   }
@@ -537,6 +719,20 @@
       headerIds: true,
       mangle: false,
     });
+
+    // Tag GFM task-list checkboxes so the toggle wiring can tell them apart from raw HTML
+    // <input> in the document (which marked passes through verbatim). Only these tagged
+    // inputs map 1:1 to taskCheckboxOffsets. data-* survives DOMPurify (ALLOW_DATA_ATTR).
+    if (typeof window.marked.use === "function") {
+      window.marked.use({
+        renderer: {
+          checkbox(arg) {
+            const checked = typeof arg === "object" && arg !== null ? arg.checked : arg;
+            return `<input data-qmd-task="" ${checked ? 'checked="" ' : ""}disabled="" type="checkbox"> `;
+          },
+        },
+      });
+    }
   }
 
   // ─── Main Init ─────────────────────────────────────────────────────
@@ -567,6 +763,8 @@
 
     applyBaseUrl(baseUrl);
     renderedDocumentTitle = `QuickMD — ${filename}`;
+    sourceMarkdown = markdown;
+    taskCheckboxOffsets = computeTaskCheckboxOffsets(markdown);
 
     try {
       const rawHtml = window.marked.parse(markdown);
