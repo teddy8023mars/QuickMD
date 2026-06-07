@@ -41,6 +41,7 @@ static NSError *QMDMakeError(NSInteger code, NSString *description) {
 @property(nonatomic, assign) BOOL hasAutoResized;
 @property(nonatomic, assign) BOOL pendingTOCVisible;
 @property(nonatomic, copy) NSString *expectedSelfWriteContent;
+@property(nonatomic, copy) NSString *renderedSourceSnapshot;
 
 - (BOOL)openMarkdownFileURL:(NSURL *)fileURL error:(NSError **)error;
 - (void)reloadPreview:(id)sender;
@@ -203,6 +204,13 @@ static NSError *QMDMakeError(NSInteger code, NSString *description) {
     self.previewFileURL = previewURL;
     self.previewReady = NO;
     self.lastExportedPDFURL = nil;
+    // Snapshot the exact bytes the preview is being rendered from. Checkbox offsets posted
+    // by the viewer are only valid against this content, so a toggle is rejected if the file
+    // has since changed (the FSEvent reload will catch up instead).
+    self.expectedSelfWriteContent = nil;
+    self.renderedSourceSnapshot = [NSString stringWithContentsOfURL:standardURL
+                                                           encoding:NSUTF8StringEncoding
+                                                              error:nil];
 
     self.window.title = [NSString stringWithFormat:@"QuickMD — %@", standardURL.lastPathComponent];
     self.window.representedURL = standardURL;
@@ -485,6 +493,14 @@ static void QMDFSEventCallback(ConstFSEventStreamRef streamRef,
                                                    error:&readError];
     if (readError || !content) return;
 
+    // The posted offset is only valid against the exact content the preview was rendered
+    // from. If the file changed since then (an external edit whose reload hasn't landed yet),
+    // the DOM is stale — reload instead of applying a stale offset to different bytes.
+    if (self.renderedSourceSnapshot && ![content isEqualToString:self.renderedSourceSnapshot]) {
+        [self reloadPreview:nil];
+        return;
+    }
+
     if (offset < 0 || offset + 3 > (NSInteger)content.length) return;
     NSRange boxRange = NSMakeRange((NSUInteger)offset, 3);
 
@@ -504,15 +520,6 @@ static void QMDFSEventCallback(ConstFSEventStreamRef streamRef,
     NSMutableString *mutableContent = [content mutableCopy];
     [mutableContent replaceCharactersInRange:boxRange withString:replacement];
 
-    // Stale-write guard: if the file changed on disk since we rendered, reload instead of clobbering.
-    NSString *latest = [NSString stringWithContentsOfURL:self.sourceFileURL
-                                                encoding:NSUTF8StringEncoding
-                                                   error:nil];
-    if (latest && ![latest isEqualToString:content]) {
-        [self reloadPreview:nil];
-        return;
-    }
-
     // Record what we are about to write so the FSEvent callback can ignore our own change.
     self.expectedSelfWriteContent = mutableContent;
 
@@ -524,6 +531,11 @@ static void QMDFSEventCallback(ConstFSEventStreamRef streamRef,
         self.expectedSelfWriteContent = nil; // write failed; let future events reload normally
         return;
     }
+
+    // The DOM still matches (only the toggled marker changed, offsets are unaffected), so
+    // advance the snapshot to the written content — otherwise the next toggle would see a
+    // mismatch and needlessly reload.
+    self.renderedSourceSnapshot = mutableContent;
 }
 
 #pragma mark - WKNavigationDelegate

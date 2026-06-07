@@ -399,6 +399,39 @@
       return out;
     }
 
+    // Blank out link reference definition blocks (which marked drops from the token list)
+    // with same-length spaces, so the forward search below can't match a token's raw text
+    // that happens to also appear inside a definition's destination/title. Positions are
+    // preserved, so offsets remain valid against the original string.
+    const maskLinkDefinitions = (text, links) => {
+      if (!links) return text;
+      const labels = new Set(Object.keys(links).map((l) => l.toLowerCase()));
+      if (!labels.size) return text;
+      const lines = text.split("\n");
+      const defOpen = /^ {0,3}\[([^\]]+)\]:\s*(.*)$/;
+      let closing = null; // delimiter that ends a title continuing across lines
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        if (closing !== null) {
+          const hit = line.indexOf(closing) >= 0;
+          lines[i] = " ".repeat(line.length);
+          if (hit) closing = null;
+          continue;
+        }
+        const m = defOpen.exec(line);
+        if (!m || !labels.has(m[1].trim().toLowerCase())) continue;
+        lines[i] = " ".repeat(line.length);
+        const tail = m[2];
+        const opener = /(^|\s)(["'(])/.exec(tail); // start of an optional title
+        if (opener) {
+          const delim = opener[2] === "(" ? ")" : opener[2];
+          if (tail.slice(opener.index + opener[0].length).indexOf(delim) < 0) closing = delim;
+        }
+      }
+      return lines.join("\n");
+    };
+    const searchSpace = maskLinkDefinitions(lf, tokens.links);
+
     // Nested-list / blockquote checkboxes: count them (so indices stay aligned with the
     // rendered DOM) but never emit an offset — their source is normalized by marked.
     const countNonEditable = (toks) => {
@@ -424,9 +457,9 @@
     for (const token of tokens) {
       let base = -1;
       for (let from = cursor; ; ) {
-        const idx = lf.indexOf(token.raw, from);
+        const idx = searchSpace.indexOf(token.raw, from);
         if (idx < 0) break;
-        if (idx === 0 || lf[idx - 1] === "\n") { base = idx; break; }
+        if (idx === 0 || searchSpace[idx - 1] === "\n") { base = idx; break; }
         from = idx + 1;
       }
       if (base < 0) base = cursor; // fallback; main.m's marker check still guards the write
