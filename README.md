@@ -2,6 +2,19 @@
 
 A lightweight, native macOS Markdown previewer. Double-click any `.md` file and get a beautifully rendered preview instantly.
 
+![QuickMD preview window](screenshot.png)
+
+**macOS 12+ · Objective-C / AppKit / WKWebView · JavaScript rendering · MIT**
+
+## Explore the implementation
+
+- [Native application](src/main.m): document opening, window lifecycle, file watching and PDF export.
+- [Renderer](src/QuickMDRenderer.sh) and [viewer logic](src/viewer.js): Markdown-to-HTML rendering and interactions.
+- [Swift Quick Look extension](QuickMDPreview/PreviewViewController.swift): a separate preview integration.
+- [Rendering regression checks](test/): task-checkbox mapping and KaTeX trust settings.
+
+[Build and install](#build) · [Keyboard shortcuts](#keyboard-shortcuts) · [Architecture](#architecture)
+
 ## Features
 
 - **GFM Support** — Full GitHub Flavored Markdown (tables, task lists, strikethrough, autolinks)
